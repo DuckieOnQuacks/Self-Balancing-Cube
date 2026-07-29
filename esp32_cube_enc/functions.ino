@@ -1,4 +1,5 @@
 void writeTo(byte device, byte address, byte value) {
+  // Helper for writing one byte to an MPU6050 register over I2C.
   Wire.beginTransmission(device);
   Wire.write(address);
   Wire.write(value);
@@ -6,6 +7,7 @@ void writeTo(byte device, byte address, byte value) {
 }
 
 void beep() {
+    // The active buzzer sounds while its pin is HIGH.
     digitalWrite(BUZZER, HIGH);
     delay(70);
     digitalWrite(BUZZER, LOW);
@@ -13,6 +15,7 @@ void beep() {
 }
 
 void save() {
+    // ESP32 EEPROM emulation needs commit() to persist the new calibration.
     EEPROM.put(0, offsets);
     EEPROM.commit();
     EEPROM.get(0, offsets);
@@ -23,6 +26,7 @@ void save() {
 }
 
 void angle_setup() {
+  // Wake the MPU6050 and select the measurement ranges from ESP32.h.
   Wire.begin();
   delay (100);
   writeTo(MPU6050, PWR_MGMT_1, 0);
@@ -30,6 +34,7 @@ void angle_setup() {
   writeTo(MPU6050, GYRO_CONFIG, gyroSens << 3); // Specifying output scaling of gyroscope
   delay (100);
   
+  // Average 512 stationary samples on each gyro axis to measure its bias.
   beep();
   leds[2] = CRGB(0, 0, 200);
   FastLED.show();
@@ -94,7 +99,7 @@ void angle_setup() {
 }
 
 void angle_calc() {
-  
+  // Read the three raw gyro registers (0x43 through 0x48).
   Wire.beginTransmission(MPU6050);
   Wire.write(0x43);
   Wire.endTransmission(false);
@@ -103,6 +108,7 @@ void angle_calc() {
   GyY = Wire.read() << 8 | Wire.read();
   GyZ = Wire.read() << 8 | Wire.read();
 
+  // Read the three raw accelerometer registers (0x3B through 0x40).
   Wire.beginTransmission(MPU6050);
   Wire.write(0x3B);                  
   Wire.endTransmission(false);
@@ -111,6 +117,8 @@ void angle_calc() {
   AcY = Wire.read() << 8 | Wire.read();
   AcZ = Wire.read() << 8 | Wire.read();
 
+  // Use the calibration values for the currently detected pose: small |AcX|
+  // means vertex mode, while a larger |AcX| means edge mode.
   if (abs(AcX) < 2000) {
     AcXc = AcX - offsets.acXv;
     AcYc = AcY - offsets.acYv;
@@ -120,18 +128,24 @@ void angle_calc() {
     AcYc = AcY - offsets.acYe;
     AcZc = AcZ - offsets.acZe;
   }
+  // Remove the stationary gyro bias before integrating angular velocity.
   GyZ -= GyZ_offset;
   GyY -= GyY_offset;
   GyX -= GyX_offset;
 
+  // Integrate gyro rate into an angle.  65.536 converts raw readings at the
+  // selected ±250°/s gyro range into degrees per second.
   robot_angleY += GyY * loop_time / 1000 / 65.536;
   Acc_angleY = atan2(AcXc, -AcZc) * 57.2958;
+  // Combine fast gyro response with the accelerometer's long-term reference.
   robot_angleY = robot_angleY * Gyro_amount + Acc_angleY * (1.0 - Gyro_amount);
 
   robot_angleX += GyX * loop_time / 1000 / 65.536;
   Acc_angleX = -atan2(AcYc, -AcZc) * 57.2958;
   robot_angleX = robot_angleX * Gyro_amount + Acc_angleX * (1.0 - Gyro_amount);
 
+  // Recognize a stable upright vertex or edge.  The tight angle thresholds
+  // prevent balancing from starting while the cube is being placed.
   if (abs(AcX) < 2000 && abs(Acc_angleX) < 0.4 && abs(Acc_angleY) < 0.4 && !vertical_vertex && !vertical_edge) {
     robot_angleX = Acc_angleX;
     robot_angleY = Acc_angleY;
@@ -140,6 +154,7 @@ void angle_calc() {
     robot_angleX = Acc_angleX;
     robot_angleY = Acc_angleY;
     vertical_edge = true;
+  // Leaving the upright range disables the active balancing mode.
   } else if ((abs(robot_angleX) > 7 || abs(robot_angleY) > 7) && vertical_vertex) {
     vertical_vertex = false;
   } else if ((abs(robot_angleX) > 7 || abs(robot_angleY) > 7) && vertical_edge) {
@@ -148,6 +163,10 @@ void angle_calc() {
 }
 
 void XYZ_to_threeWay(float pwm_X, float pwm_Y, float pwm_Z) {
+  // The three motors are arranged 120° apart.  Convert desired X/Y/Z axis
+  // commands into individual motor commands using the inverse mix.
+  // 0.5 and 0.866 are cos(60°) and sin(60°); the other factors compensate
+  // for this hardware's motor geometry and scale.
   int16_t m1 = round((0.5 * pwm_X - 0.866 * pwm_Y) / 1.37 + pwm_Z);  
   int16_t m2 = round((0.5 * pwm_X + 0.866 * pwm_Y) / 1.37 + pwm_Z);
   int16_t m3 = -pwm_X / 1.37 + pwm_Z;  
@@ -157,11 +176,14 @@ void XYZ_to_threeWay(float pwm_X, float pwm_Y, float pwm_Z) {
 }
 
 void threeWay_to_XY(int in_speed1, int in_speed2, int in_speed3) {
+  // Forward mix: reconstruct X/Y movement from measured motor speeds.
   speed_X = ((in_speed3 - (in_speed2 + in_speed1) * 0.5) * 0.5) * 1.81;
   speed_Y = -(-0.866 * (in_speed2 - in_speed1)) / 1.1;
 }
 
 void battVoltage(double voltage) {
+  // voltage is the ADC value divided by a board-specific scale factor.  The
+  // buzzer warns while the battery reading is in the configured low range.
   if (voltage > 8 && voltage <= 9.5) {
     digitalWrite(BUZZER, HIGH);
   } else {
@@ -170,19 +192,24 @@ void battVoltage(double voltage) {
 }
 
 void pwmSet(uint8_t channel, uint32_t value) {
+  // Write an 8-bit duty-cycle value to an ESP32 LEDC PWM channel.
   ledcWrite(channel, value);
 }
 
 void Motor1_control(int sp) {
+  // Add the measured speed so the command includes motor-speed feedback.
   sp = sp + motor1_speed;
   if (sp < 0) 
     digitalWrite(DIR1, LOW);
   else 
     digitalWrite(DIR1, HIGH);
+  // The driver uses inverted PWM: 255 is stopped and smaller values drive
+  // the motor harder.
   pwmSet(PWM1_CH, 255 - abs(sp));
 }
 
 void Motor2_control(int sp) {
+  // Motor 2 uses the same direction and inverted-PWM convention as motor 1.
   sp = sp + motor2_speed;
   if (sp < 0) 
     digitalWrite(DIR2, LOW);
@@ -192,6 +219,7 @@ void Motor2_control(int sp) {
 }
 
 void Motor3_control(int sp) {
+  // Motor 3 uses the same direction and inverted-PWM convention as motor 1.
   sp = sp + motor3_speed;
   if (sp < 0) 
     digitalWrite(DIR3, LOW);
@@ -201,6 +229,8 @@ void Motor3_control(int sp) {
 }
 
 void ENC1_READ() {
+  // Quadrature decoder: remember the previous channel states and count only
+  // valid clockwise/counter-clockwise transitions.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC1_1) << 1) | digitalRead(ENC1_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -211,6 +241,7 @@ void ENC1_READ() {
 }
 
 void ENC2_READ() {
+  // Same quadrature decoder for motor 2's encoder.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC2_1) << 1) | digitalRead(ENC2_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -221,6 +252,7 @@ void ENC2_READ() {
 }
 
 void ENC3_READ() {
+  // Same quadrature decoder for motor 3's encoder.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC3_1) << 1) | digitalRead(ENC3_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -231,6 +263,8 @@ void ENC3_READ() {
 }
 
 int Tuning() {
+  // Bluetooth commands are two characters: a parameter followed by an
+  // action.  For example, c+ starts calibration and c- records a pose.
   if (!SerialBT.available())  return 0;
   char param = SerialBT.read();               // get parameter byte
   if (!SerialBT.available()) return 0;
@@ -238,6 +272,8 @@ int Tuning() {
   switch (param) {
     case 'c':
       if (cmd == '+' && !calibrating) {
+        // Calibration is a two-step process: record a valid vertex first,
+        // then record a valid edge and save both offsets to EEPROM.
         calibrating = true;
         SerialBT.println("Calibrating on.");
         SerialBT.println("Set the cube on vertex...");
@@ -248,6 +284,7 @@ int Tuning() {
       }
       if (cmd == '-' && calibrating)  {
         SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
+        // Vertex pose: gravity is mostly along Z, so X and Y are near zero.
         if (abs(AcX) < 2000 && abs(AcY) < 2000) {
           offsets.ID = 96;
           offsets.acXv = AcX;
@@ -261,6 +298,8 @@ int Tuning() {
           leds[2] = CRGB(0, 250, 250);
           FastLED.show();
           beep();
+        // Edge pose: X has a characteristic gravity reading and Y remains
+        // near zero.  Refuse edge calibration until the vertex was accepted.
         } else if (abs(AcX) > 7000 && abs(AcX) < 10000 && abs(AcY) < 2000 && vertex_calibrated) {
           SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
           SerialBT.println("Edge OK.");

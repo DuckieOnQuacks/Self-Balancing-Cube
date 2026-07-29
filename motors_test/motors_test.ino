@@ -1,3 +1,5 @@
+// Pin map for the diagnostic sketch.  It matches the balancing firmware so
+// this sketch can test the same assembled hardware.
 #define BRAKE       26
 #define BUZZER      27
 
@@ -22,6 +24,7 @@
 #define TIMER_BIT  8
 #define BASE_FREQ  20000
 
+// Encoder counts are updated by interrupts and sampled every 100 ms.
 volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;
 int16_t motor1_speed;         
 int16_t motor2_speed;         
@@ -29,10 +32,11 @@ int16_t motor3_speed;
 
 long currentT, previousT_1, previousT_2;
 
-int f;
-boolean lock = false;
+int f;                     // Current test step, 1 through 18
+boolean lock = false;      // Print each step's message only once
 
 void beep() {
+    // Active buzzer: HIGH sounds it, LOW silences it.
     digitalWrite(BUZZER, HIGH);
     delay(70);
     digitalWrite(BUZZER, LOW);
@@ -40,28 +44,35 @@ void beep() {
 }
 
 void pwmSet(uint8_t channel, uint32_t value) {
+  // Send an 8-bit duty-cycle value to the selected ESP32 PWM channel.
   ledcWrite(channel, value);
 }
 
 void Motor1_control(int sp) {
+  // This test sketch uses the motor driver's direction convention directly.
+  // Its PWM is inverted: 255 is stopped and lower values apply more drive.
   if (sp > 0) digitalWrite(DIR1, LOW);
     else digitalWrite(DIR1, HIGH);
   pwmSet(PWM1_CH, 255 - abs(sp));
 }
 
 void Motor2_control(int sp) {
+  // Motor 2 has the same driver interface as motor 1.
   if (sp > 0) digitalWrite(DIR2, LOW);
     else digitalWrite(DIR2, HIGH);
   pwmSet(PWM2_CH, 255 - abs(sp));
 }
 
 void Motor3_control(int sp) {
+  // Motor 3 has the same driver interface as motor 1.
   if (sp > 0) digitalWrite(DIR3, LOW);
     else digitalWrite(DIR3, HIGH);
   pwmSet(PWM3_CH, 255 - abs(sp));
 }
 
 void ENC1_READ() {
+  // Decode the two encoder channels as a quadrature signal.  The transition
+  // table increments for one direction and decrements for the other.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC1_1) << 1) | digitalRead(ENC1_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -72,6 +83,7 @@ void ENC1_READ() {
 }
 
 void ENC2_READ() {
+  // Quadrature decoder for motor 2's encoder.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC2_1) << 1) | digitalRead(ENC2_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -82,6 +94,7 @@ void ENC2_READ() {
 }
 
 void ENC3_READ() {
+  // Quadrature decoder for motor 3's encoder.
   static int state = 0;
   state = (state << 2 | (digitalRead(ENC3_1) << 1) | digitalRead(ENC3_2)) & 0x0f;
   if (state == 0x02 || state == 0x0d || state == 0x04 || state == 0x0b) {
@@ -93,6 +106,8 @@ void ENC3_READ() {
 
 void setup() {
 
+  // Initialize the brake, each motor's direction/PWM pins, and both encoder
+  // interrupts.  Motor outputs start at zero before testing begins.
   Serial.begin(115200);
 
   pinMode(BUZZER, OUTPUT);
@@ -133,6 +148,7 @@ void loop() {
 
     currentT = millis();
     
+    // Sample encoder counts every 100 ms and execute the selected test step.
     if (currentT - previousT_1 >= 100) {
       motor1_speed = enc_count1;
       enc_count1 = 0;
@@ -141,6 +157,8 @@ void loop() {
       motor3_speed = enc_count3;
       enc_count3 = 0;
 
+      // Each motor has six steps: rotate one way, stop, rotate the other way,
+      // stop, run while checking the encoder, then report the result.
       switch (f) {
        case 1:
         digitalWrite(BRAKE, HIGH);
@@ -280,6 +298,8 @@ void loop() {
       previousT_1 = currentT;
     }
     
+    // Move to the next test step every three seconds.  After all 18 steps,
+    // start again with motor 1 and beep to mark the new cycle.
     if (currentT - previousT_2 >= 3000) { 
      f++;
      if (f == 19) {
