@@ -112,6 +112,10 @@ int32_t motors_speed_Z;
 // for slower battery/calibration status messages.
 long currentT, previousT_1, previousT_2;
 
+// Battery voltage computed in the slow status loop (see battVoltage()).
+// Stored here so the web interface can report it through /api/state.
+float batt_voltage = 0;
+
 // Encoder counts are modified inside interrupt handlers, so they must be
 // volatile.  The main loop periodically copies and resets them.
 volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;

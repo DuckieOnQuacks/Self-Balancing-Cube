@@ -184,6 +184,7 @@ void threeWay_to_XY(int in_speed1, int in_speed2, int in_speed3) {
 void battVoltage(double voltage) {
   // voltage is the ADC value divided by a board-specific scale factor.  The
   // buzzer warns while the battery reading is in the configured low range.
+  batt_voltage = voltage;   // keep a copy for the web interface (/api/state)
   if (voltage > 8 && voltage <= 9.5) {
     digitalWrite(BUZZER, HIGH);
   } else {
