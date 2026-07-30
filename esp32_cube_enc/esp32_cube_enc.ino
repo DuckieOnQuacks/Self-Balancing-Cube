@@ -8,19 +8,43 @@ BluetoothSerial SerialBT;
 CRGB leds[NUM_PIXELS];
 
 void setup() {
+  // ---- MOTOR SAFETY: this block must run before anything slow. ----
+  // Until LEDC is attached, the PWM pins float, and this driver hardware
+  // treats a floating/LOW PWM input as FULL DRIVE (the PWM is inverted:
+  // 255 = stopped).  Engage the brake and force all three PWM outputs to
+  // the stopped level immediately, so the motors cannot run away during
+  // the LED animation and gyro-bias measurement below.
+  pinMode(BRAKE, OUTPUT);
+  digitalWrite(BRAKE, LOW);   // brake engaged; the balancing loop releases
+                              // it only when an upright pose is active
+  pinMode(DIR1, OUTPUT);
+  pinMode(DIR2, OUTPUT);
+  pinMode(DIR3, OUTPUT);
+  // ESP32 core 3.x API: ledcAttach() replaces ledcSetup()+ledcAttachPin()
+  // and manages the channel internally; PWM is now addressed by pin.
+  bool pwm_ok = ledcAttach(PWM1, BASE_FREQ, TIMER_BIT);
+  pwm_ok = ledcAttach(PWM2, BASE_FREQ, TIMER_BIT) && pwm_ok;
+  pwm_ok = ledcAttach(PWM3, BASE_FREQ, TIMER_BIT) && pwm_ok;
+  Motor1_control(0);          // duty 255 = stopped (inverted PWM)
+  Motor2_control(0);
+  Motor3_control(0);
+  // ---- end motor safety block ----
+
   // Start the two serial interfaces: USB serial is useful for diagnostics,
   // while Bluetooth is used to tune gains and run calibration.
   Serial.begin(115200);
+  // If any LEDC attach failed, the PWM pins are still floating and the
+  // motors are NOT safe: report it loudly and keep the brake engaged.
+  if (!pwm_ok)
+    Serial.println("ERROR: motor PWM attach failed - outputs unconfigured!");
   SerialBT.begin("ESP32-Cube"); // Bluetooth device name
   EEPROM.begin(EEPROM_SIZE);
-  
+
   // The three WS2812B LEDs provide visual feedback during startup,
   // calibration, and low-battery warnings.
   FastLED.addLeds<WS2812B, LED_PIN, RGB>(leds, NUM_PIXELS);  // GRB ordering is typical
-  
+
   pinMode(BUZZER, OUTPUT);
-  pinMode(BRAKE, OUTPUT);
-  digitalWrite(BRAKE, HIGH);
 
   // Cycle through red, green, and blue to show that the LEDs are working.
   for (int i=0;i<=255;i+=10) {
@@ -52,34 +76,23 @@ void setup() {
   leds[2] = CRGB::Black;
   FastLED.show();
   
-  // Each motor has a direction pin, two encoder channels, and one PWM output.
-  // Both encoder channels trigger the same quadrature decoder on every edge.
-  pinMode(DIR1, OUTPUT);
+  // Encoder inputs: both channels of each encoder trigger the same
+  // quadrature decoder on every edge.  (Direction/PWM outputs were already
+  // configured in the motor-safety block at the top of setup().)
   pinMode(ENC1_1, INPUT);
   pinMode(ENC1_2, INPUT);
   attachInterrupt(ENC1_1, ENC1_READ, CHANGE);
   attachInterrupt(ENC1_2, ENC1_READ, CHANGE);
-  ledcSetup(PWM1_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM1, PWM1_CH);
-  Motor1_control(0);
-  
-  pinMode(DIR2, OUTPUT);
+
   pinMode(ENC2_1, INPUT);
   pinMode(ENC2_2, INPUT);
   attachInterrupt(ENC2_1, ENC2_READ, CHANGE);
   attachInterrupt(ENC2_2, ENC2_READ, CHANGE);
-  ledcSetup(PWM2_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM2, PWM2_CH);
-  Motor2_control(0);
-  
-  pinMode(DIR3, OUTPUT);
+
   pinMode(ENC3_1, INPUT);
   pinMode(ENC3_2, INPUT);
   attachInterrupt(ENC3_1, ENC3_READ, CHANGE);
   attachInterrupt(ENC3_2, ENC3_READ, CHANGE);
-  ledcSetup(PWM3_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM3, PWM3_CH);
-  Motor3_control(0);
 
   // A valid ID means that accelerometer offsets were previously saved.
   // EEPROM data survives power cycles, so calibration is normally needed only
@@ -92,6 +105,9 @@ void setup() {
   // Configure the MPU6050 and measure the gyro's stationary bias.
   angle_setup();
 
+  // Start the Wi-Fi access point and web server (see web_interface.ino).
+  // Done last so it cannot disturb the gyro-bias measurement above.
+  startWebInterface();
 }
 
 void loop() {
@@ -179,5 +195,10 @@ void loop() {
       }
     }
     previousT_2 = currentT;
-  }  
+  }
+
+  // Service pending HTTP clients (web_interface.ino).  Non-blocking: it
+  // returns immediately when no client is connected, so the timed balancing
+  // loop above is unaffected.
+  handleWebInterface();
 }

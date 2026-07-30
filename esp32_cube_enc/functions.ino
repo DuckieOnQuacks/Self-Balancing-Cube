@@ -191,9 +191,10 @@ void battVoltage(double voltage) {
   }
 }
 
-void pwmSet(uint8_t channel, uint32_t value) {
-  // Write an 8-bit duty-cycle value to an ESP32 LEDC PWM channel.
-  ledcWrite(channel, value);
+void pwmSet(uint8_t pin, uint32_t value) {
+  // Write an 8-bit duty-cycle value to a PWM output.  ESP32 core 3.x
+  // addresses LEDC by pin number (the old API used channel numbers).
+  ledcWrite(pin, value);
 }
 
 void Motor1_control(int sp) {
@@ -205,7 +206,7 @@ void Motor1_control(int sp) {
     digitalWrite(DIR1, HIGH);
   // The driver uses inverted PWM: 255 is stopped and smaller values drive
   // the motor harder.
-  pwmSet(PWM1_CH, 255 - abs(sp));
+  pwmSet(PWM1, 255 - abs(sp));
 }
 
 void Motor2_control(int sp) {
@@ -215,7 +216,7 @@ void Motor2_control(int sp) {
     digitalWrite(DIR2, LOW);
   else 
     digitalWrite(DIR2, HIGH);
-  pwmSet(PWM2_CH, 255 - abs(sp));
+  pwmSet(PWM2, 255 - abs(sp));
 }
 
 void Motor3_control(int sp) {
@@ -225,7 +226,7 @@ void Motor3_control(int sp) {
     digitalWrite(DIR3, LOW);
   else 
     digitalWrite(DIR3, HIGH);
-  pwmSet(PWM3_CH, 255 - abs(sp));
+  pwmSet(PWM3, 255 - abs(sp));
 }
 
 void ENC1_READ() {
