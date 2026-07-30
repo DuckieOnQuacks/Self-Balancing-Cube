@@ -43,9 +43,10 @@ void beep() {
     delay(80);
 }
 
-void pwmSet(uint8_t channel, uint32_t value) {
-  // Send an 8-bit duty-cycle value to the selected ESP32 PWM channel.
-  ledcWrite(channel, value);
+void pwmSet(uint8_t pin, uint32_t value) {
+  // Send an 8-bit duty-cycle value to a PWM output.  ESP32 core 3.x
+  // addresses LEDC by pin number (the old API used channel numbers).
+  ledcWrite(pin, value);
 }
 
 void Motor1_control(int sp) {
@@ -53,21 +54,21 @@ void Motor1_control(int sp) {
   // Its PWM is inverted: 255 is stopped and lower values apply more drive.
   if (sp > 0) digitalWrite(DIR1, LOW);
     else digitalWrite(DIR1, HIGH);
-  pwmSet(PWM1_CH, 255 - abs(sp));
+  pwmSet(PWM1, 255 - abs(sp));
 }
 
 void Motor2_control(int sp) {
   // Motor 2 has the same driver interface as motor 1.
   if (sp > 0) digitalWrite(DIR2, LOW);
     else digitalWrite(DIR2, HIGH);
-  pwmSet(PWM2_CH, 255 - abs(sp));
+  pwmSet(PWM2, 255 - abs(sp));
 }
 
 void Motor3_control(int sp) {
   // Motor 3 has the same driver interface as motor 1.
   if (sp > 0) digitalWrite(DIR3, LOW);
     else digitalWrite(DIR3, HIGH);
-  pwmSet(PWM3_CH, 255 - abs(sp));
+  pwmSet(PWM3, 255 - abs(sp));
 }
 
 void ENC1_READ() {
@@ -119,8 +120,9 @@ void setup() {
   pinMode(ENC1_2, INPUT);
   attachInterrupt(ENC1_1, ENC1_READ, CHANGE);
   attachInterrupt(ENC1_2, ENC1_READ, CHANGE);
-  ledcSetup(PWM1_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM1, PWM1_CH);
+  // ESP32 core 3.x API: ledcAttach() replaces ledcSetup()+ledcAttachPin()
+  // and manages the channel internally; PWM is now addressed by pin.
+  ledcAttach(PWM1, BASE_FREQ, TIMER_BIT);
   Motor1_control(0);
   
   pinMode(DIR2, OUTPUT);
@@ -128,8 +130,7 @@ void setup() {
   pinMode(ENC2_2, INPUT);
   attachInterrupt(ENC2_1, ENC2_READ, CHANGE);
   attachInterrupt(ENC2_2, ENC2_READ, CHANGE);
-  ledcSetup(PWM2_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM2, PWM2_CH);
+  ledcAttach(PWM2, BASE_FREQ, TIMER_BIT);
   Motor2_control(0);
   
   pinMode(DIR3, OUTPUT);
@@ -137,8 +138,7 @@ void setup() {
   pinMode(ENC3_2, INPUT);
   attachInterrupt(ENC3_1, ENC3_READ, CHANGE);
   attachInterrupt(ENC3_2, ENC3_READ, CHANGE);
-  ledcSetup(PWM3_CH, BASE_FREQ, TIMER_BIT);
-  ledcAttachPin(PWM3, PWM3_CH);
+  ledcAttach(PWM3, BASE_FREQ, TIMER_BIT);
   Motor3_control(0);
 
   delay(2000);

@@ -201,7 +201,12 @@ void pwmSet(uint8_t pin, uint32_t value) {
 void Motor1_control(int sp) {
   // Add the measured speed so the command includes motor-speed feedback.
   sp = sp + motor1_speed;
-  if (sp < 0) 
+  // The caller's command is already limited to +/-255, but adding the
+  // encoder feedback can push past it.  Without this clamp, 255 - abs(sp)
+  // would go negative and wrap to a huge value in pwmSet's uint32_t duty
+  // argument, producing an out-of-range duty instead of full braking.
+  sp = constrain(sp, -255, 255);
+  if (sp < 0)
     digitalWrite(DIR1, LOW);
   else 
     digitalWrite(DIR1, HIGH);
@@ -213,7 +218,8 @@ void Motor1_control(int sp) {
 void Motor2_control(int sp) {
   // Motor 2 uses the same direction and inverted-PWM convention as motor 1.
   sp = sp + motor2_speed;
-  if (sp < 0) 
+  sp = constrain(sp, -255, 255);   // see Motor1_control
+  if (sp < 0)
     digitalWrite(DIR2, LOW);
   else 
     digitalWrite(DIR2, HIGH);
@@ -223,7 +229,8 @@ void Motor2_control(int sp) {
 void Motor3_control(int sp) {
   // Motor 3 uses the same direction and inverted-PWM convention as motor 1.
   sp = sp + motor3_speed;
-  if (sp < 0) 
+  sp = constrain(sp, -255, 255);   // see Motor1_control
+  if (sp < 0)
     digitalWrite(DIR3, LOW);
   else 
     digitalWrite(DIR3, HIGH);
