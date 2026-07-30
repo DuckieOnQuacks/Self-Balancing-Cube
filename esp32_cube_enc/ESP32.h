@@ -52,11 +52,25 @@
 
 // Tuning gains are saved after the offsets struct.
 #define GAINS_EEPROM_ADDR 32
-#define NUM_GAINS         10
-#define GAINS_ID          0x6A   // marks a valid saved gain set
+#define NUM_GAINS         11   // 10 balancing gains + the auto-trim rate
+// Marks a valid saved gain set.  Bump it only if the ORDER of GAIN_DEFS
+// changes or the fixed fields below move - not merely because a gain was
+// added or removed.  The record carries its own count and keeps the
+// variable-length array last, so the loader reads whichever is smaller of
+// the stored and current gain counts and the fixed fields stay put.
+// History: 0x6A original 10 gains, 0x6B added tK, 0x6C added the learned
+// trim, 0x6D reordered to the self-describing layout used now.
+#define GAINS_ID          0x6D
 struct GainsObj {
   int   ID;
-  float v[NUM_GAINS];
+  int   count;      // number of gains in v[] when this record was written
+  // The learned balance point is saved with the gains so the cube applies it
+  // immediately at boot, instead of spending the first minute re-learning it
+  // and drifting in the meantime.  It is a physical property of the cube, so
+  // it barely changes between sessions.
+  float trimX;
+  float trimY;
+  float v[NUM_GAINS];   // must stay LAST - see the note above
 };
 
 #define LED_PIN       19     // Pin that connects to WS2812B
@@ -91,6 +105,9 @@ extern float eK1;
 extern float eK2;
 extern float eK3;
 extern float eK4;
+// Auto-trim adaptation rate.  0 disables auto-trim (the default), which
+// leaves balancing exactly as it was before the feature existed.
+extern float tK;
 
 extern int loop_time;        // Main control period in milliseconds
 
@@ -148,6 +165,29 @@ extern float batt_voltage;
 #define WEB_CMD_CAL_CAPTURE 5  // record the current pose (same as "c-")
 #define WEB_CMD_CAL_SAVE    6  // write the offsets to EEPROM
 #define WEB_CMD_GAINS_SAVE  7  // write the current gains to EEPROM
+#define WEB_CMD_TRIM_RESET  8  // clear the learned balance-point trim
+// --- Yaw rate command -------------------------------------------------
+// Commanded rotation rate about the vertical axis, in degrees/second, used
+// only in vertex mode.  Zero means "hold heading", which is the original
+// behaviour.  Written by an HTTP handler, so volatile; the control loop
+// copies it into yaw_rate_cmd once per iteration.
+#define YAW_RATE_MAX 90.0f     // clamp, degrees/second
+extern volatile float yaw_rate_request;
+extern float yaw_rate_cmd;
+
+// --- Balance-point auto-trim ------------------------------------------
+// The cube's true balance point is rarely at exactly zero degrees: the
+// centre of mass sits a little off the contact point.  Holding a setpoint
+// of zero therefore means a permanent small angle error, so the wheels
+// accelerate steadily to hold the cube up until they saturate and it falls.
+//
+// The trim below is a slowly-learned offset applied to the angle setpoint.
+// It is driven by persistent wheel speed: sustained speed in one direction
+// means the setpoint is wrong, so the trim moves until the wheels settle.
+// Adaptation rate is the tunable gain tK; tK = 0 disables it entirely.
+#define TRIM_MAX 3.0f          // clamp, degrees - a runaway trim cannot
+                               // command more than a small lean
+extern float trimX, trimY;
 // volatile because it is written by an HTTP handler and read by the loop.
 extern volatile uint8_t web_cmd_pending;
 

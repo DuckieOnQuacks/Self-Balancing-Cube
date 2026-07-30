@@ -26,6 +26,7 @@ float eK1 = 190;
 float eK2 = 31.00;
 float eK3 = 2.5;
 float eK4 = 0.014;
+float tK = 0;                  // auto-trim off until the user enables it
 
 int loop_time = 15;
 
@@ -56,12 +57,22 @@ float batt_voltage = 0;
 
 volatile uint8_t web_cmd_pending = WEB_CMD_NONE;
 
-bool armed = true;
+// Boot DISARMED.  angle_calc() detects an upright pose on its own, inside a
+// 0.4 degree window, with no human input - so booting armed means a cube
+// left standing on its vertex spins up three wheels a couple of seconds
+// after power-on, unattended.  Arm deliberately from the dashboard, or with
+// "a+" over USB serial if the access point is unavailable.
+bool armed = false;
 
 volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;
 int16_t motor1_speed;
 int16_t motor2_speed;
 int16_t motor3_speed;
+
+// Yaw-rate command and learned balance-point trim (see ESP32.h).
+volatile float yaw_rate_request = 0;
+float yaw_rate_cmd = 0;
+float trimX = 0, trimY = 0;
 
 CRGB leds[NUM_PIXELS];
 const char* cal_result = "";   // see ESP32.h
@@ -204,6 +215,8 @@ void loop() {
         armed = false;              // blocks balancing until re-armed
         vertical_vertex = false;    // forget the current upright pose
         vertical_edge = false;
+        yaw_rate_request = 0;       // never resume a spin on its own
+        yaw_rate_cmd = 0;
         break;
       case WEB_CMD_ARM:
         armed = true;
@@ -212,6 +225,13 @@ void loop() {
         // the cube jump straight back into balancing from a stale pose.
         vertical_vertex = false;
         vertical_edge = false;
+        yaw_rate_request = 0;       // arm to a standstill, not into a spin
+        yaw_rate_cmd = 0;
+        break;
+      case WEB_CMD_TRIM_RESET:
+        // Forget the learned balance point and start again from zero.
+        trimX = 0;
+        trimY = 0;
         break;
       // Calibration commands run the same functions as the Bluetooth "c+"
       // and "c-" commands.  Each is refused while the cube is actively
@@ -234,10 +254,22 @@ void loop() {
         // Persist the gains currently in use.  Editing gains from the
         // dashboard only changes RAM; the EEPROM write happens here, once
         // per explicit Save, so tuning never wears out the flash.
-        saveGains();
+        //
+        // Refused while balancing, like the calibration writes: an NVS
+        // commit stalls the control loop for tens of milliseconds with the
+        // flash cache disabled, and the encoder interrupt handlers are not
+        // in IRAM, so wheel counts are lost across the write.  The HTTP
+        // handler checks this too; re-checked here because the cube can
+        // start balancing between request and action.
+        if (!balancingActive()) saveGains();
         break;
     }
     web_cmd_pending = WEB_CMD_NONE; // request consumed
+
+    // Take the yaw-rate request set by the HTTP handler and clamp it.  The
+    // handler validates too; this is the authoritative limit, so a bad
+    // value can never reach the controller.
+    yaw_rate_cmd = constrain(yaw_rate_request, -YAW_RATE_MAX, YAW_RATE_MAX);
 
     // Vertex mode controls two tilt axes and the common Z rotation axis.
     // "armed" gates both balancing branches; when false the else branch
@@ -250,12 +282,38 @@ void loop() {
       gyroXfilt = alpha * gyroX + (1 - alpha) * gyroXfilt;
       gyroYfilt = alpha * gyroY + (1 - alpha) * gyroYfilt;
       
+      // Learn the true balance point.  Sustained wheel speed in one
+      // direction means the setpoint is on the wrong side of the real
+      // balance point, so move the trim AGAINST that speed until the wheels
+      // settle.  The rate is tiny (tK is small and this runs every 15 ms) so
+      // it tracks only the slow drift, never the fast balancing dynamics.
+      // tK = 0 freezes adaptation but a trim already learned (or restored
+      // from EEPROM) still applies - that is the "learn once, then hold"
+      // workflow.  Reset trim gives back exactly the original controller.
+      //
+      // Sign: subtracting is correct for this controller's convention, where
+      // +K3 * speed_X is the stabilising wheel-unwind term.  If the trim on
+      // your hardware runs to the +/-TRIM_MAX clamp and balancing gets worse
+      // instead of better, the encoder polarity is inverted - set tK
+      // negative rather than editing this line.
+      if (tK != 0) {
+        trimX = constrain(trimX - tK * speed_X * loop_time / 1000.0,
+                          -TRIM_MAX, TRIM_MAX);
+        trimY = constrain(trimY - tK * speed_Y * loop_time / 1000.0,
+                          -TRIM_MAX, TRIM_MAX);
+      }
+
       // Each term counters a different part of the motion:
       // angle keeps the cube upright, gyro rate damps it, and the speed terms
       // reduce motion that would otherwise build up around the equilibrium.
-      int pwm_X = constrain(K1 * robot_angleX + K2 * gyroXfilt + K3 * speed_X + K4 * motors_speed_X, -255, 255);
-      int pwm_Y = constrain(K1 * robot_angleY + K2 * gyroYfilt + K3 * speed_Y + K4 * motors_speed_Y, -255, 255);
-      int pwm_Z = constrain(zK2 * gyroZ + zK3 * motors_speed_Z, -255, 255);
+      // Subtracting the trim shifts the angle setpoint onto the balance point.
+      int pwm_X = constrain(K1 * (robot_angleX - trimX) + K2 * gyroXfilt + K3 * speed_X + K4 * motors_speed_X, -255, 255);
+      int pwm_Y = constrain(K1 * (robot_angleY - trimY) + K2 * gyroYfilt + K3 * speed_Y + K4 * motors_speed_Y, -255, 255);
+      // Z is a rate loop: driving (gyroZ - yaw_rate_cmd) to zero holds the
+      // heading when the command is zero, and spins at the commanded rate
+      // otherwise.  Injecting the setpoint here leaves the loop's stability
+      // untouched - only its target changes.
+      int pwm_Z = constrain(zK2 * (gyroZ - yaw_rate_cmd) + zK3 * motors_speed_Z, -255, 255);
 
       // A small accumulated speed correction acts like an integral term.
       motors_speed_X += speed_X / 5; 
@@ -267,9 +325,16 @@ void loop() {
       digitalWrite(BRAKE, HIGH);
       gyroX = GyX / 131.0;
       gyroXfilt = alpha * gyroX + (1 - alpha) * gyroXfilt;
-      
-      int pwm_X = constrain(eK1 * robot_angleX + eK2 * gyroXfilt + eK3 * motor3_speed + eK4 * motors_speed_X, -255, 255);
-      
+
+      // Same balance-point learning as vertex mode, but edge mode measures
+      // its wheel speed from motor 3 alone (see the eK3 term below).
+      if (tK != 0) {
+        trimX = constrain(trimX - tK * motor3_speed * loop_time / 1000.0,
+                          -TRIM_MAX, TRIM_MAX);
+      }
+
+      int pwm_X = constrain(eK1 * (robot_angleX - trimX) + eK2 * gyroXfilt + eK3 * motor3_speed + eK4 * motors_speed_X, -255, 255);
+
       motors_speed_X += motor3_speed / 5;
       Motor3_control(pwm_X);
     } else {

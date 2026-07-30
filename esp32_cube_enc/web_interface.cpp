@@ -52,6 +52,12 @@ const GainDef GAIN_DEFS[] = {
   {"eK2", &eK2, 0.0, 200.0,  31.0  },  // edge: angular rate
   {"eK3", &eK3, 0.0,  50.0,   2.5  },  // edge: motor 3 speed
   {"eK4", &eK4, 0.0,   1.0,   0.014},  // edge: motor speed
+  // Auto-trim adaptation rate.  Default 0 = off, so the controller behaves
+  // exactly as before until the user opts in.  The limit is small on
+  // purpose: this is meant to track slow drift, not fight the balancing.
+  // Negative values are allowed so the sign can be flipped from the web
+  // interface if this hardware's encoder polarity is inverted.
+  {"tK",  &tK, -0.5,   0.5,   0.0  },  // balance-point auto-trim rate
 };
 // Keep the table and the EEPROM record in step at compile time.
 static_assert(sizeof(GAIN_DEFS) / sizeof(GAIN_DEFS[0]) == NUM_GAINS,
@@ -70,12 +76,25 @@ void loadGains() {
   GainsObj g;
   EEPROM.get(GAINS_EEPROM_ADDR, g);
   if (g.ID != GAINS_ID) return;          // nothing saved yet
-  for (int i = 0; i < NUM_GAINS; i++) {
+  // Only trust as many gains as the stored record actually contained.  A
+  // record written by an older build with fewer gains stays valid; the ones
+  // it did not know about keep their defaults.
+  int n = g.count;
+  if (n < 0) n = 0;
+  if (n > NUM_GAINS) n = NUM_GAINS;
+  for (int i = 0; i < n; i++) {
     float v = g.v[i];
     if (isnan(v) || v < GAIN_DEFS[i].lo || v > GAIN_DEFS[i].hi) continue;
     *GAIN_DEFS[i].ptr = v;
   }
-  Serial.println("Loaded saved tuning gains from EEPROM.");
+  // Restore the learned balance point, range-checked the same way.  A bad
+  // value simply leaves the trim at zero, which is the old behaviour.
+  if (!isnan(g.trimX) && g.trimX >= -TRIM_MAX && g.trimX <= TRIM_MAX)
+    trimX = g.trimX;
+  if (!isnan(g.trimY) && g.trimY >= -TRIM_MAX && g.trimY <= TRIM_MAX)
+    trimY = g.trimY;
+  Serial.print("Loaded saved gains from EEPROM. Trim X ");
+  Serial.print(trimX, 3); Serial.print(" Y "); Serial.println(trimY, 3);
 }
 
 // Write the live gains to EEPROM.  Called only from the control loop, in
@@ -84,10 +103,14 @@ void loadGains() {
 void saveGains() {
   GainsObj g;
   g.ID = GAINS_ID;
+  g.count = NUM_GAINS;                   // so a future build knows how many
   for (int i = 0; i < NUM_GAINS; i++) g.v[i] = *GAIN_DEFS[i].ptr;
+  // Store the balance point learned so far, so it is in force at next boot.
+  g.trimX = trimX;
+  g.trimY = trimY;
   EEPROM.put(GAINS_EEPROM_ADDR, g);
   EEPROM.commit();
-  Serial.println("Saved tuning gains to EEPROM.");
+  Serial.println("Saved tuning gains and trim to EEPROM.");
 }
 
 // The dashboard page.  Stored in flash (PROGMEM) rather than RAM, and sent
@@ -120,6 +143,21 @@ align-self:center}
 .inst{position:relative;width:100%;max-width:330px;margin:0 auto;
 aspect-ratio:1;display:grid;place-items:center}
 svg{width:76%;height:76%;overflow:visible}
+/* One visualizer per pose. Vertex balancing is two-axis and uses all three
+   wheels, so it gets the target. Edge balancing is a ONE-axis problem -
+   only tilt X and motor 3 appear in its control law - so it gets a side-on
+   pendulum instead, and the readouts that do not apply are hidden. */
+#evis,body.e #vvis{display:none}
+body.e #evis{display:block}
+body.e .w.b,body.e .w.c{display:none}
+body.e .w.a{top:auto;bottom:-4px}
+body.e #ayw{opacity:.28}
+.cube{fill:#1b242d;stroke:var(--live);stroke-width:2;stroke-linejoin:round;
+transition:stroke .2s}
+.cube.q{stroke:var(--ok)}
+#ebody{transition:transform .12s linear}
+.gnd{stroke:#33414d;stroke-width:2}
+.piv{fill:var(--live)}
 .ring{fill:none;stroke:var(--ln);stroke-width:1}
 .ring.o{stroke:#33414d}
 .ax{stroke:var(--ln);stroke-width:1;stroke-dasharray:2 5}
@@ -162,6 +200,14 @@ box-shadow:0 6px 20px -8px var(--stop)}
 .b{min-height:48px;padding:12px;font-size:14px;font-weight:600;
 letter-spacing:.06em;background:var(--pnl);border:1px solid var(--ln)}
 .b:active{background:#1f2831}
+.b:active,#stop:active{transform:scale(.97)}
+button:disabled{opacity:.5}
+/* Result flash on the button that was pressed: green accepted, red rejected.
+   Keyframed rules outrank the normal ones, so #stop's glow gives way. */
+.ok{animation:fok .7s}
+.er{animation:fer .7s}
+@keyframes fok{0%,55%{box-shadow:inset 0 0 0 2px var(--ok)}}
+@keyframes fer{0%,55%{box-shadow:inset 0 0 0 2px var(--stop)}}
 .b.w1{grid-column:1/-1}
 /* collapsible sections ----------------------------------------------- */
 details{background:var(--pnl);border:1px solid var(--ln);border-radius:10px;
@@ -187,8 +233,16 @@ ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
 .gr input:focus{outline:2px solid var(--live);outline-offset:-1px;
 border-color:transparent}
 :focus-visible{outline:2px solid var(--live);outline-offset:2px}
+/* yaw slider: full width, thumb sized for a fingertip */
+input[type=range]{width:100%;margin:10px 0 2px;accent-color:var(--live);
+height:28px}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums;font-size:15px}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;
-transition:none!important}}
+transition:none!important}
+/* no animation, so hold the outcome as a static ring until the next press */
+.ok{box-shadow:inset 0 0 0 2px var(--ok)}
+.er{box-shadow:inset 0 0 0 2px var(--stop)}}
 </style></head><body>
 
 <header><span id="lamp"></span><h1>Cube</h1><div id="s">connecting</div></header>
@@ -197,7 +251,7 @@ transition:none!important}}
      angle_calc(); the radial scale is sqrt so the sub-degree angles seen while
      balancing are actually visible. Motors sit at their true 120 deg spacing. -->
 <div class="inst">
-<svg viewBox="0 0 200 200" aria-hidden="true">
+<svg id="vvis" viewBox="0 0 200 200" aria-hidden="true">
 <circle class="ring o" cx="100" cy="100" r="70"/>
 <circle class="ring" cx="100" cy="100" r="46"/>
 <circle class="ring" cx="100" cy="100" r="26"/>
@@ -207,6 +261,19 @@ transition:none!important}}
 <text class="tick" x="103" y="70">3°</text>
 <text class="tick" x="103" y="26">7°</text>
 <circle id="dot" cx="100" cy="100" r="5"/>
+</svg>
+<!-- Edge view: the cube seen along the edge it stands on, so its outline is
+     a square balanced on one corner. It pivots about the contact point,
+     which is what the eK1 term is actually regulating. Rotation uses the
+     same sqrt scale as the target above, so sub-degree tilts are visible;
+     the true angle is on the Tilt X readout. -->
+<svg id="evis" viewBox="0 0 200 200" aria-hidden="true">
+<line class="ax" x1="100" y1="14" x2="100" y2="170"/>
+<g id="ebody"><polygon id="ecube" class="cube"
+points="100,170 158,112 100,54 42,112"/></g>
+<line class="gnd" x1="14" y1="170" x2="186" y2="170"/>
+<circle class="piv" cx="100" cy="170" r="3.5"/>
+<text class="tick" x="105" y="20">upright</text>
 </svg>
 <div class="w a"><span class="k">M3</span><b id="m3">—</b>
 <div class="bar"><i id="b3"></i></div></div>
@@ -218,7 +285,7 @@ transition:none!important}}
 
 <div class="ang">
 <div><span class="k">Tilt X</span><b id="ax">—</b></div>
-<div><span class="k">Tilt Y</span><b id="ay">—</b></div>
+<div id="ayw"><span class="k">Tilt Y</span><b id="ay">—</b></div>
 </div>
 
 <div class="st">
@@ -231,6 +298,22 @@ transition:none!important}}
 <button id="stop">SAFE STOP</button>
 <div class="ab"><button class="b" id="arm">ARM</button>
 <button class="b" id="disarm">DISARM</button></div>
+
+<details><summary>Motion</summary><div class="bd">
+<div style="display:flex;justify-content:space-between;align-items:baseline">
+<span class="k">Yaw rate</span><b class="m" id="yv">0 °/s</b></div>
+<input type="range" id="yaw" min="-90" max="90" step="5" value="0">
+<button class="b w1" id="ystop" style="margin-top:8px">Stop spin</button>
+<p class="note">Spins the cube about its vertical axis while balancing.
+Returns to zero on stop, disarm or arm.</p>
+<div style="display:flex;justify-content:space-between;align-items:baseline">
+<span class="k">Learned trim</span><b class="m" id="tv">—</b></div>
+<p class="note" id="tn">Auto-trim is off. Set the tK gain above zero to
+enable it.</p>
+<button class="b w1" id="treset">Reset trim</button>
+<p class="note">Saved with the gains, so it applies from the next boot.
+Reset it after changing the cube's hardware, then save again.</p>
+</div></details>
 
 <details><summary>Calibration</summary><div class="bd">
 <p class="note" id="ch">—</p>
@@ -248,7 +331,7 @@ raw</p>
 <div class="ab">
 <button class="b" id="gapply">Apply</button>
 <button class="b" id="gdef">Restore defaults</button>
-<button class="b w1" id="gsave">Save to EEPROM</button></div>
+<button class="b w1" id="gsave">Save gains + trim</button></div>
 <p class="note" id="gm" style="margin:12px 0 0">Changes take effect at once.
 They are lost on restart until you save.</p>
 </div></details>
@@ -265,6 +348,9 @@ function rad(a){
  var m=Math.min(Math.abs(a)/7,1);
  return (a<0?-1:1)*Math.sqrt(m)*70;
 }
+// Same curve for the edge pendulum, mapped to +/-22 deg of visible rotation
+// so the cube reads as tipping without leaving the frame.
+function tilt(a){return rad(a)/70*22;}
 function poll(){
  if(busy)return; busy=true;
  fetch('/api/state',{cache:'no-store'}).then(function(r){return r.json();})
@@ -276,6 +362,15 @@ function poll(){
   // Green inside the vertex capture window, amber once it is drifting.
   var q=Math.abs(d.robot_angleX)<0.4&&Math.abs(d.robot_angleY)<0.4;
   $('dot').setAttribute('class',q?'q':'');  // SVG: className is read-only
+  // Edge pendulum. Both visualizers are updated unconditionally - it is two
+  // attribute writes - and CSS shows whichever one matches the pose.
+  $('ebody').setAttribute('transform',
+    'rotate('+tilt(d.robot_angleX).toFixed(2)+',100,170)');
+  $('ecube').setAttribute('class',
+    'cube'+(Math.abs(d.robot_angleX)<0.4?' q':''));
+  // Edge mode only when the firmware is actually in it; anything else keeps
+  // the general-purpose attitude target.
+  document.body.classList.toggle('e',d.vertical_edge&&!d.vertical_vertex);
   var s=[d.motor1_speed,d.motor2_speed,d.motor3_speed];
   mmax=Math.max(40,Math.abs(s[0]),Math.abs(s[1]),Math.abs(s[2]));
   for(var i=0;i<3;i++){
@@ -303,27 +398,62 @@ function poll(){
   // uses. Both used to be Bluetooth-only.
   $('cr').textContent=d.cal_result||'';
   $('raw').textContent='raw  X '+d.acX+'   Y '+d.acY+'   Z '+d.acZ;
-  $('s').textContent='live';
+  // Learned balance-point trim. Only meaningful once tK is above zero.
+  $('tv').textContent=d.trimX.toFixed(2)+'° / '+d.trimY.toFixed(2)+'°';
+  var tk=G&&G.tK?G.tK.v:0;
+  $('tn').textContent=tk>0
+   ?'Auto-trim active (tK '+tk+'). Values settle as the cube balances.'
+   :'Auto-trim is off. Set the tK gain above zero to enable it.';
+  // Reflect the firmware's actual yaw command unless the user is dragging.
+  if(!dragging)$('yv').textContent=d.yaw_rate.toFixed(0)+' °/s';
+  // Don't erase a command result the user has not had time to read.
+  if(Date.now()>msgUntil)$('s').textContent='live';
  }).catch(function(){$('s').textContent='no signal';})
  .then(function(){busy=false;});
 }
 setInterval(poll,300);                 // 300 ms refresh (spec: 250-500 ms)
 poll();
+// --- button feedback --------------------------------------------------
+// A press has to be visibly acknowledged even over a slow AP link, so every
+// command button greys out while its request is in flight, then flashes the
+// outcome.  msgUntil holds the header text against the 300 ms poll.
+var msgUntil=0;
+function say(t){$('s').textContent=t;msgUntil=Date.now()+2500;}
+function flash(b,ok){
+ if(!b)return;
+ b.disabled=false;
+ b.classList.remove('ok','er');
+ void b.offsetWidth;                   // reflow: restarts the animation when
+ b.classList.add(ok?'ok':'er');        // the same button is pressed again
+}
 // Sends a command request only; the main control loop acts on it.
-function send(cmd){
+function send(cmd,b){
+ var n=cmd.replace('_',' ');
+ // SAFE STOP is never disabled - a hung request must not make it unpressable.
+ // Everything else re-enables on a watchdog in case no response ever arrives.
+ if(b&&b.id!='stop'){b.disabled=true;
+  setTimeout(function(){b.disabled=false;},3000);}
+ say(n+'…');
  fetch('/api/command',{method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
   body:'cmd='+cmd})
- .then(function(r){$('s').textContent=
-   r.ok?cmd.replace('_',' ')+' sent':cmd.replace('_',' ')+' failed '+r.status;})
- .catch(function(){$('s').textContent=cmd.replace('_',' ')+' failed';});
+ .then(function(r){return r.text().then(function(t){
+   // Show the firmware's own reason ("disarm first", "stop pending") rather
+   // than a bare status code - that is the part worth reading.
+   var e='';try{e=JSON.parse(t).error||'';}catch(x){}
+   say(r.ok?n+' sent':n+' rejected — '+(e||r.status));
+   flash(b,r.ok);
+  });})
+ .catch(function(){say(n+' failed');flash(b,false);});
 }
-$('stop').onclick=function(){send('stop');};
-$('disarm').onclick=function(){send('disarm');};
+// One binder for every command button, with an optional confirmation.
+function bind(id,cmd,ask){$(id).onclick=function(){
+ if(ask&&!confirm(ask))return;
+ send(cmd,this);};}
+bind('stop','stop');
+bind('disarm','disarm');
 // Arming re-enables balancing, so require a deliberate confirmation.
-$('arm').onclick=function(){
- if(confirm('Arm the cube? Balancing will resume.'))send('arm');
-};
+bind('arm','arm','Arm the cube? Balancing will resume.');
 // --- gain editing -----------------------------------------------------
 // The form is built from /api/gains so the firmware's gain table stays the
 // single source of truth: add a gain there and it appears here too.
@@ -341,39 +471,62 @@ function loadG(){
  });
 }
 loadG();
-function applyG(){
+function applyG(btn){
  if(!G)return;
  // Send every field; the firmware validates each one and rejects the whole
  // request if any is out of range.
  var b=[];
  for(var k in G){b.push(k+'='+$('g_'+k).value);}
+ if(btn)btn.disabled=true;
+ $('gm').textContent='Applying…';
  fetch('/api/gains',{method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
   body:b.join('&')})
  .then(function(r){return r.json().then(function(j){
    $('gm').textContent=r.ok?'Applied. Save to keep them after a restart.'
                            :('Rejected — '+j.error);
+   flash(btn,r.ok);
    if(r.ok)loadG();                    // re-read what the firmware accepted
   });})
- .catch(function(){$('gm').textContent='Apply failed.';});
+ .catch(function(){$('gm').textContent='Apply failed.';flash(btn,false);});
 }
-$('gapply').onclick=applyG;
+$('gapply').onclick=function(){applyG(this);};
 $('gdef').onclick=function(){
  // Restore Defaults just fills the form with the firmware's defaults and
  // applies them - still not saved until SAVE is pressed.
  if(!G||!confirm('Restore default gains?'))return;
  for(var k in G){$('g_'+k).value=+G[k].d.toFixed(4);}
- applyG();
+ applyG(this);
 };
-$('gsave').onclick=function(){
- if(confirm('Save current gains to EEPROM?'))send('gains_save');
-};
-$('cstart').onclick=function(){send('cal_start');};
-$('ccap').onclick=function(){send('cal_capture');};
+bind('gsave','gains_save','Save gains and the learned trim to EEPROM?');
+// --- yaw slider -------------------------------------------------------
+// Dragging fires continuously, so the rate is sent at most every 150 ms.
+// The ESP32 serves one client at a time; an unthrottled slider would queue
+// requests faster than they drain and stall the telemetry poll.
+var dragging=false,ySent=0,yPend=null;
+function sendYaw(v){
+ fetch('/api/command',{method:'POST',
+  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:'cmd=yaw&rate='+v})
+ .catch(function(){$('s').textContent='yaw failed';});
+}
+function yawChanged(){
+ var v=$('yaw').value;
+ $('yv').textContent=v+' °/s';
+ var now=Date.now();
+ if(now-ySent>150){ySent=now;sendYaw(v);}
+ else{clearTimeout(yPend);
+      yPend=setTimeout(function(){ySent=Date.now();sendYaw($('yaw').value);},150);}
+}
+$('yaw').oninput=function(){dragging=true;yawChanged();};
+$('yaw').onchange=function(){dragging=false;yawChanged();};
+$('ystop').onclick=function(){$('yaw').value=0;dragging=false;yawChanged();
+ flash(this,true);say('spin stopped');};
+bind('treset','trim_reset');
+bind('cstart','cal_start');
+bind('ccap','cal_capture');
 // Saving writes EEPROM, so confirm before spending a write cycle.
-$('csave').onclick=function(){
- if(confirm('Save calibration to EEPROM?'))send('cal_save');
-};
+bind('csave','cal_save','Save calibration to EEPROM?');
 </script></body></html>)rawliteral";
 
 // GET /  — serve the dashboard straight from flash.
@@ -420,6 +573,10 @@ void handleApiState() {
       "\"acX\":%d,"
       "\"acY\":%d,"
       "\"acZ\":%d,"
+      // Learned balance-point offset and the active yaw command.
+      "\"trimX\":%.3f,"
+      "\"trimY\":%.3f,"
+      "\"yaw_rate\":%.1f,"
       "\"cal_result\":\"%s\""
     "}",
     robot_angleX, robot_angleY,
@@ -434,7 +591,8 @@ void handleApiState() {
     vertex_calibrated ? "true" : "false",
     armed             ? "true" : "false",
     batt_voltage,
-    AcX, AcY, AcZ, cal_result);
+    AcX, AcY, AcZ, trimX, trimY, yaw_rate_cmd,
+    cal_result);
   // Truncated JSON would be malformed, so refuse to send it rather than let
   // the dashboard silently fail to parse.
   if (n < 0 || n >= (int)sizeof(json)) {
@@ -537,14 +695,46 @@ void handleApiCommand() {
   String cmd = webServer.arg("cmd");
 
   uint8_t req;
-  bool is_cal = false;               // calibration commands are restricted
+  // Commands that must not run while the motors are balancing: the
+  // calibration steps, and anything that writes EEPROM.
+  bool needs_idle = false;
   if (cmd == "stop")        req = WEB_CMD_STOP;
   else if (cmd == "disarm") req = WEB_CMD_DISARM;
   else if (cmd == "arm")    req = WEB_CMD_ARM;
-  else if (cmd == "cal_start")   { req = WEB_CMD_CAL_START;   is_cal = true; }
-  else if (cmd == "cal_capture") { req = WEB_CMD_CAL_CAPTURE; is_cal = true; }
-  else if (cmd == "cal_save")    { req = WEB_CMD_CAL_SAVE;    is_cal = true; }
-  else if (cmd == "gains_save")  req = WEB_CMD_GAINS_SAVE;
+  else if (cmd == "cal_start")   { req = WEB_CMD_CAL_START;   needs_idle = true; }
+  else if (cmd == "cal_capture") { req = WEB_CMD_CAL_CAPTURE; needs_idle = true; }
+  else if (cmd == "cal_save")    { req = WEB_CMD_CAL_SAVE;    needs_idle = true; }
+  // Saving gains writes EEPROM, so it needs an idle cube for the same
+  // reason the calibration commands do.
+  else if (cmd == "gains_save")  { req = WEB_CMD_GAINS_SAVE;  needs_idle = true; }
+  else if (cmd == "trim_reset")  req = WEB_CMD_TRIM_RESET;
+  else if (cmd == "yaw") {
+    // Yaw is a setpoint, not an action: record the requested rate and
+    // return.  The control loop clamps and applies it on its next pass;
+    // nothing here touches a motor.
+    if (!webServer.hasArg("rate")) {
+      webServer.send(400, "application/json",
+                     "{\"ok\":false,\"error\":\"yaw needs a rate\"}");
+      return;
+    }
+    String raw = webServer.arg("rate");
+    const char* s = raw.c_str();
+    char* end;
+    double v = strtod(s, &end);
+    while (*end == ' ') end++;
+    if (end == s || *end != '\0' || isnan(v) || isinf(v)
+        || v < -YAW_RATE_MAX || v > YAW_RATE_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err),
+               "{\"ok\":false,\"error\":\"rate must be a number between "
+               "%.0f and %.0f deg/s\"}", -YAW_RATE_MAX, YAW_RATE_MAX);
+      webServer.send(400, "application/json", err);
+      return;
+    }
+    yaw_rate_request = (float)v;
+    webServer.send(200, "application/json", "{\"ok\":true,\"cmd\":\"yaw\"}");
+    return;
+  }
   else {
     // Reject anything unrecognised rather than silently ignoring it.
     webServer.send(400, "application/json",
@@ -552,12 +742,13 @@ void handleApiCommand() {
     return;
   }
 
-  // Never calibrate while the motors are actively balancing.  Rejecting here
+  // Never calibrate or write EEPROM while the motors are actively balancing.
+  // Rejecting here
   // gives the user immediate feedback; the control loop re-checks before
   // acting, since the cube could start balancing in between.
-  if (is_cal && balancingActive()) {
+  if (needs_idle && balancingActive()) {
     webServer.send(409, "application/json",
-                   "{\"ok\":false,\"error\":\"cannot calibrate while balancing"
+                   "{\"ok\":false,\"error\":\"not while balancing"
                    " - disarm first\"}");
     return;
   }

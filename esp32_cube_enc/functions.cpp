@@ -161,8 +161,16 @@ void angle_calc() {
   // Leaving the upright range disables the active balancing mode.
   } else if ((abs(robot_angleX) > 7 || abs(robot_angleY) > 7) && vertical_vertex) {
     vertical_vertex = false;
+    yaw_rate_request = 0;   // see below
+    yaw_rate_cmd = 0;
   } else if ((abs(robot_angleX) > 7 || abs(robot_angleY) > 7) && vertical_edge) {
     vertical_edge = false;
+    // Losing the pose means the cube fell.  Forget any commanded spin: the
+    // pose flags re-set on their own once it is upright again, so without
+    // this the cube would resume balancing AND spin straight back up to the
+    // old yaw rate - with whoever just picked it up still holding it.
+    yaw_rate_request = 0;
+    yaw_rate_cmd = 0;
   }
 }
 
@@ -351,6 +359,23 @@ int Tuning() {
   if (!Serial.available()) return 0;
   char cmd = Serial.read();                   // get command byte
   switch (param) {
+    case 'a':
+      // Arm/disarm over the wire.  This is the way back in when the Wi-Fi
+      // access point fails to start, which is also the case that disarms the
+      // cube automatically - without this it would be unusable, not merely
+      // unstoppable.  Routed through the same command flag the dashboard
+      // uses, so both paths behave identically; Tuning() runs earlier in the
+      // same loop iteration that consumes it.
+      // A stop already waiting must never be overwritten by an arm - the
+      // same rule the HTTP handler enforces.
+      if (cmd == '+' && web_cmd_pending != WEB_CMD_STOP) {
+        web_cmd_pending = WEB_CMD_ARM;
+        Serial.println("Arming.");
+      } else if (cmd == '-') {
+        web_cmd_pending = WEB_CMD_DISARM;
+        Serial.println("Disarming.");
+      }
+      break;
     case 'c':
       // Refuse to calibrate while the motors are actively balancing - the
       // same rule the web interface enforces.  The old Bluetooth path was
