@@ -19,7 +19,7 @@
 // Access-point credentials.  Change the password before real use;
 // WPA2 requires it to be at least 8 characters long.
 const char* WIFI_NAME = "Cube-Control";
-const char* WIFI_PASSWORD = "poop";
+const char* WIFI_PASSWORD = "poop1234";
 
 // HTTP server on the standard port, so plain http://<ip> works.
 WebServer webServer(80);
