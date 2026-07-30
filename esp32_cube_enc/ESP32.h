@@ -1,5 +1,13 @@
 // ESP32 pin assignments.  Keeping these in one file makes it easier to
 // adapt the firmware if the PCB wiring changes.
+//
+// This header is shared across separate .cpp translation units (rather than
+// being concatenated Arduino-.ino-style into one file), so it only declares
+// things: types, macros, and `extern` globals.  The actual storage for the
+// globals below is defined once, in esp32_cube_enc.cpp.
+#include <Arduino.h>
+#include <FastLED.h>
+
 #define BUZZER      27
 #define VBAT        34
 #define INT_LED     2
@@ -56,35 +64,35 @@ struct GainsObj {
 
 // Complementary-filter weight.  The gyro responds quickly, while the
 // accelerometer slowly corrects gyro drift using the direction of gravity.
-float Gyro_amount = 0.996;
+extern float Gyro_amount;
 
 // These flags describe the cube's current operating state.
 // Balancing is allowed only after calibration and when a valid upright pose
 // has been detected.
-bool vertical_vertex = false;
-bool vertical_edge = false;
-bool calibrating = false;
-bool vertex_calibrated = false;
-bool calibrated = false;
-bool calibrated_leds = false;
+extern bool vertical_vertex;
+extern bool vertical_edge;
+extern bool calibrating;
+extern bool vertex_calibrated;
+extern bool calibrated;
+extern bool calibrated_leds;
 
 // PID-like balancing gains for vertex mode:
 // K1 = angle, K2 = angular rate, K3 = translational speed, K4 = motor speed.
 // The Z axis uses separate gains because it is controlled differently.
-float K1 = 180;
-float K2 = 30.00; 
-float K3 = 1.6;
-float K4 = 0.008;
-float zK2 = 8.00;
-float zK3 = 0.30;
+extern float K1;
+extern float K2;
+extern float K3;
+extern float K4;
+extern float zK2;
+extern float zK3;
 
 // Gains used while balancing on an edge.  Edge mode uses motor 3 directly.
-float eK1 = 190;
-float eK2 = 31.00; 
-float eK3 = 2.5;
-float eK4 = 0.014;
+extern float eK1;
+extern float eK2;
+extern float eK3;
+extern float eK4;
 
-int loop_time = 15;          // Main control period in milliseconds
+extern int loop_time;        // Main control period in milliseconds
 
 // Accelerometer offsets measured in the two calibration poses.
 // The vertex and edge poses have different gravity vectors, so each gets
@@ -98,38 +106,38 @@ struct OffsetsObj {
   float acYe;
   float acZe;
 };
-OffsetsObj offsets;
+extern OffsetsObj offsets;
 
-float alpha = 0.7;           // Low-pass filter for gyro rate used by control
+extern float alpha;          // Low-pass filter for gyro rate used by control
 
 // Raw and corrected MPU6050 readings.
-int16_t  AcX, AcY, AcZ, AcXc, AcYc, AcZc, GyX, GyY, GyZ;
-float gyroX, gyroY, gyroZ, gyroXfilt, gyroYfilt, gyroZfilt;
-float speed_X, speed_Y;
+extern int16_t  AcX, AcY, AcZ, AcXc, AcYc, AcZc, GyX, GyY, GyZ;
+extern float gyroX, gyroY, gyroZ, gyroXfilt, gyroYfilt, gyroZfilt;
+extern float speed_X, speed_Y;
 
 // Gyro bias found during startup while the cube is stationary.
-int16_t  GyZ_offset = 0;
-int16_t  GyY_offset = 0;
-int16_t  GyX_offset = 0;
-int32_t  GyZ_offset_sum = 0;
-int32_t  GyY_offset_sum = 0;
-int32_t  GyX_offset_sum = 0;
+extern int16_t  GyZ_offset;
+extern int16_t  GyY_offset;
+extern int16_t  GyX_offset;
+extern int32_t  GyZ_offset_sum;
+extern int32_t  GyY_offset_sum;
+extern int32_t  GyX_offset_sum;
 
-float robot_angleX, robot_angleY; // Fused orientation estimates
-float Acc_angleX, Acc_angleY;     // Orientation estimated from gravity only
-int32_t motors_speed_X;            // Integrated speed feedback in X/Y/Z
-int32_t motors_speed_Y;
-int32_t motors_speed_Z;
+extern float robot_angleX, robot_angleY; // Fused orientation estimates
+extern float Acc_angleX, Acc_angleY;     // Orientation estimated from gravity only
+extern int32_t motors_speed_X;            // Integrated speed feedback in X/Y/Z
+extern int32_t motors_speed_Y;
+extern int32_t motors_speed_Z;
 
 // Two independent timers are used: one for the fast balancing loop and one
 // for slower battery/calibration status messages.
-long currentT, previousT_1, previousT_2;
+extern long currentT, previousT_1, previousT_2;
 
 // Battery voltage computed in the slow status loop (see battVoltage()).
 // Stored here so the web interface can report it through /api/state.
-float batt_voltage = 0;
+extern float batt_voltage;
 
-// --- Web command interface (see web_interface.ino) ---------------------
+// --- Web command interface (see web_interface.cpp) ---------------------
 // HTTP handlers never touch the motors.  They only store a request here,
 // and the main control loop acts on it at the start of a control cycle.
 #define WEB_CMD_NONE    0
@@ -141,24 +149,57 @@ float batt_voltage = 0;
 #define WEB_CMD_CAL_SAVE    6  // write the offsets to EEPROM
 #define WEB_CMD_GAINS_SAVE  7  // write the current gains to EEPROM
 // volatile because it is written by an HTTP handler and read by the loop.
-volatile uint8_t web_cmd_pending = WEB_CMD_NONE;
-
-// Entry points implemented in web_interface.ino.  Declared explicitly
-// because Arduino's automatic prototype generation stops emitting
-// declarations for functions defined after the dashboard's large raw-string
-// literal, which leaves setup()/loop() unable to see these.
-void startWebInterface();
-void handleWebInterface();
+extern volatile uint8_t web_cmd_pending;
 
 // Master enable for balancing.  Defaults to true so the cube behaves exactly
 // as before unless the web interface explicitly disarms it.  While false,
 // the control loop takes its normal "not balancing" path: no drive, brake
 // engaged.  Only an ARM command or a restart clears it.
-bool armed = true;
+extern bool armed;
 
 // Encoder counts are modified inside interrupt handlers, so they must be
 // volatile.  The main loop periodically copies and resets them.
-volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;
-int16_t motor1_speed;         
-int16_t motor2_speed;         
-int16_t motor3_speed;     
+extern volatile int  enc_count1, enc_count2, enc_count3;
+extern int16_t motor1_speed;
+extern int16_t motor2_speed;
+extern int16_t motor3_speed;
+
+// Objects defined in esp32_cube_enc.cpp, used from functions.cpp.
+extern CRGB leds[NUM_PIXELS];
+
+// Result of the most recent calibration capture, shown on the dashboard.
+// Bluetooth used to carry this feedback; now it travels in /api/state.
+// Always points at a string literal, so it needs no allocation and is
+// safe to embed in JSON (no quotes or backslashes in any of the values).
+extern const char* cal_result;
+
+// Entry points implemented in web_interface.cpp.  Every .ino file used to be
+// concatenated into one translation unit, so Arduino auto-generated forward
+// declarations for whatever a later file defined.  Now that each file is
+// compiled on its own, that no longer happens - so every function called
+// from a *different* .cpp file needs an explicit prototype here.
+void startWebInterface();
+void handleWebInterface();
+void loadGains();
+void saveGains();
+bool balancingActive();
+
+// Entry points implemented in functions.cpp.
+void writeTo(byte device, byte address, byte value);
+void beep();
+void save();
+void angle_setup();
+void angle_calc();
+void XYZ_to_threeWay(float pwm_X, float pwm_Y, float pwm_Z);
+void threeWay_to_XY(int in_speed1, int in_speed2, int in_speed3);
+void battVoltage(double voltage);
+void pwmSet(uint8_t pin, uint32_t value);
+void Motor1_control(int sp);
+void Motor2_control(int sp);
+void Motor3_control(int sp);
+void ENC1_READ();
+void ENC2_READ();
+void ENC3_READ();
+void calStart();
+void calCapture();
+int Tuning();

@@ -1,11 +1,70 @@
 #include "ESP32.h"
 #include <Wire.h>
 #include <EEPROM.h>
-#include "BluetoothSerial.h"
-#include <FastLED.h>
 
-BluetoothSerial SerialBT;
+// Storage for the globals declared `extern` in ESP32.h.  This is the one
+// translation unit that defines them; every other file just links against
+// these.  (Split out of ESP32.h itself so including that header from
+// multiple .cpp files doesn't define each variable more than once.)
+float Gyro_amount = 0.996;
+
+bool vertical_vertex = false;
+bool vertical_edge = false;
+bool calibrating = false;
+bool vertex_calibrated = false;
+bool calibrated = false;
+bool calibrated_leds = false;
+
+float K1 = 180;
+float K2 = 30.00;
+float K3 = 1.6;
+float K4 = 0.008;
+float zK2 = 8.00;
+float zK3 = 0.30;
+
+float eK1 = 190;
+float eK2 = 31.00;
+float eK3 = 2.5;
+float eK4 = 0.014;
+
+int loop_time = 15;
+
+OffsetsObj offsets;
+
+float alpha = 0.7;
+
+int16_t  AcX, AcY, AcZ, AcXc, AcYc, AcZc, GyX, GyY, GyZ;
+float gyroX, gyroY, gyroZ, gyroXfilt, gyroYfilt, gyroZfilt;
+float speed_X, speed_Y;
+
+int16_t  GyZ_offset = 0;
+int16_t  GyY_offset = 0;
+int16_t  GyX_offset = 0;
+int32_t  GyZ_offset_sum = 0;
+int32_t  GyY_offset_sum = 0;
+int32_t  GyX_offset_sum = 0;
+
+float robot_angleX, robot_angleY;
+float Acc_angleX, Acc_angleY;
+int32_t motors_speed_X;
+int32_t motors_speed_Y;
+int32_t motors_speed_Z;
+
+long currentT, previousT_1, previousT_2;
+
+float batt_voltage = 0;
+
+volatile uint8_t web_cmd_pending = WEB_CMD_NONE;
+
+bool armed = true;
+
+volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;
+int16_t motor1_speed;
+int16_t motor2_speed;
+int16_t motor3_speed;
+
 CRGB leds[NUM_PIXELS];
+const char* cal_result = "";   // see ESP32.h
 
 void setup() {
   // ---- MOTOR SAFETY: this block must run before anything slow. ----
@@ -37,7 +96,6 @@ void setup() {
   // motors are NOT safe: report it loudly and keep the brake engaged.
   if (!pwm_ok)
     Serial.println("ERROR: motor PWM attach failed - outputs unconfigured!");
-  SerialBT.begin("ESP32-Cube"); // Bluetooth device name
   EEPROM.begin(EEPROM_SIZE);
 
   // The three WS2812B LEDs provide visual feedback during startup,
@@ -109,7 +167,7 @@ void setup() {
   // Configure the MPU6050 and measure the gyro's stationary bias.
   angle_setup();
 
-  // Start the Wi-Fi access point and web server (see web_interface.ino).
+  // Start the Wi-Fi access point and web server (see web_interface.cpp).
   // Done last so it cannot disturb the gyro-bias measurement above.
   startWebInterface();
 }
@@ -231,8 +289,8 @@ void loop() {
   if (currentT - previousT_2 >= 2000) {    
     battVoltage((double)analogRead(VBAT) / 204); // value 204 must be selected by measuring battery voltage!
     if (!calibrated && !calibrating) {
-      SerialBT.println("first you need to calibrate the balancing points...");
-      Serial.println("first you need to calibrate the balancing points (over bluetooth)...");
+      Serial.println("Not calibrated yet - use the web dashboard "
+                     "(http://192.168.4.1) or send c+ / c- over USB serial.");
       if (!calibrated_leds) {
         leds[0] = CRGB(0, 255, 0);
         leds[1] = CRGB(0, 255, 0);
@@ -250,7 +308,7 @@ void loop() {
     previousT_2 = currentT;
   }
 
-  // Service pending HTTP clients (web_interface.ino).  Non-blocking: it
+  // Service pending HTTP clients (web_interface.cpp).  Non-blocking: it
   // returns immediately when no client is connected, so the timed balancing
   // loop above is unaffected.
   handleWebInterface();

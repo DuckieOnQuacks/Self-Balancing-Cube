@@ -1,3 +1,7 @@
+#include "ESP32.h"
+#include <Wire.h>
+#include <EEPROM.h>
+
 void writeTo(byte device, byte address, byte value) {
   // Helper for writing one byte to an MPU6050 register over I2C.
   Wire.beginTransmission(device);
@@ -21,7 +25,7 @@ void save() {
     EEPROM.get(0, offsets);
     if (offsets.ID == 96) calibrated = true;
     calibrating = false;
-    SerialBT.println("Calibrating off.");
+    Serial.println("Calibrating off.");
     beep();
 }
 
@@ -277,8 +281,9 @@ void calStart() {
   // Extracted from Tuning() so the Bluetooth and web interfaces run the
   // exact same calibration code rather than two copies that could drift.
   calibrating = true;
-  SerialBT.println("Calibrating on.");
-  SerialBT.println("Set the cube on vertex...");
+  cal_result = "Calibration started.";
+  Serial.println("Calibrating on.");
+  Serial.println("Set the cube on vertex...");
   leds[0] = CRGB(250, 250, 0);
   leds[1] = CRGB(250, 250, 0);
   leds[2] = CRGB(250, 250, 0);
@@ -288,15 +293,16 @@ void calStart() {
 void calCapture() {
   // Record whichever pose the cube is currently in.  Shared by the
   // Bluetooth "c-" command and the web interface's Capture Pose button.
-  SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
+  Serial.print("X: "); Serial.print(AcX); Serial.print(" Y: "); Serial.print(AcY); Serial.print(" Z: "); Serial.println(AcZ + 16384);
   // Vertex pose: gravity is mostly along Z, so X and Y are near zero.
   if (abs(AcX) < 2000 && abs(AcY) < 2000) {
     offsets.ID = 96;
     offsets.acXv = AcX;
     offsets.acYv = AcY;
     offsets.acZv = AcZ + 16384;
-    SerialBT.println("Vertex OK.");
-    SerialBT.println("Set the cube on edge...");
+    cal_result = "Vertex captured. Now set the cube on an edge.";
+    Serial.println("Vertex OK.");
+    Serial.println("Set the cube on edge...");
     vertex_calibrated = true;
     leds[0] = CRGB(0, 250, 250);
     leds[1] = CRGB(0, 250, 250);
@@ -306,8 +312,9 @@ void calCapture() {
   // Edge pose: X has a characteristic gravity reading and Y remains
   // near zero.  Refuse edge calibration until the vertex was accepted.
   } else if (abs(AcX) > 7000 && abs(AcX) < 10000 && abs(AcY) < 2000 && vertex_calibrated) {
-    SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
-    SerialBT.println("Edge OK.");
+    Serial.print("X: "); Serial.print(AcX); Serial.print(" Y: "); Serial.print(AcY); Serial.print(" Z: "); Serial.println(AcZ + 16384);
+    cal_result = "Edge captured. Calibration saved.";
+    Serial.println("Edge OK.");
     offsets.acXe = AcX;
     offsets.acYe = AcY;
     offsets.acZe = AcZ + 16384;
@@ -317,7 +324,10 @@ void calCapture() {
     FastLED.show();
     save();
   } else {
-    SerialBT.println("The angles are wrong!!!");
+    // Neither pose matched.  This is the feedback Bluetooth used to carry;
+    // it now reaches the dashboard through cal_result in /api/state.
+    cal_result = "Pose not recognised - check the cube is settled and level.";
+    Serial.println("The angles are wrong!!!");
     beep();
     beep();
   }
@@ -331,14 +341,24 @@ bool balancingActive() {
 }
 
 int Tuning() {
-  // Bluetooth commands are two characters: a parameter followed by an
-  // action.  For example, c+ starts calibration and c- records a pose.
-  if (!SerialBT.available())  return 0;
-  char param = SerialBT.read();               // get parameter byte
-  if (!SerialBT.available()) return 0;
-  char cmd = SerialBT.read();                 // get command byte
+  // Wired fallback for calibration, over USB serial.  This used to be the
+  // Bluetooth channel; it moved to Serial when Bluetooth was removed, so
+  // there is still a way in if the Wi-Fi access point ever fails to start.
+  // The protocol is unchanged: two characters, a parameter then an action.
+  // c+ starts calibration, c- records the current pose.
+  if (!Serial.available())  return 0;
+  char param = Serial.read();                 // get parameter byte
+  if (!Serial.available()) return 0;
+  char cmd = Serial.read();                   // get command byte
   switch (param) {
     case 'c':
+      // Refuse to calibrate while the motors are actively balancing - the
+      // same rule the web interface enforces.  The old Bluetooth path was
+      // missing this check, so a c+ mid-balance dropped the cube.
+      if (balancingActive()) {
+        Serial.println("Refused: cannot calibrate while balancing. Disarm first.");
+        break;
+      }
       if (cmd == '+' && !calibrating) {
         calStart();
       }

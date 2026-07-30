@@ -18,15 +18,29 @@ Folow this video https://youtu.be/ZU0oTBRDgOE
 
 ESP32, MPU6050, Nidec 24H brushless motors, 500 mAh LiPo battery.
 
-Balancing controllers can be tuned remotely over bluetooth.
+## Wi-Fi web interface
 
-Example:
+The cube hosts its own Wi-Fi access point, so no router or internet is
+needed. Connect a phone to the **Cube-Control** network and open
+**http://192.168.4.1**.
 
-Send p+ (or p+p+p+p+p+p+p+) for increase K1.
+The dashboard shows live tilt on an attitude target (the outer ring is the
+±7° angle at which balancing disengages), the three motor speeds, battery
+voltage, and status. From it you can:
 
-Send p- (or p-p-p-p-p-p-p-) for decrease K1.
+- **SAFE STOP / ARM / DISARM** — stop the motors and keep them stopped
+- **Calibrate** — start, capture each pose, save to EEPROM
+- **Tune gains** — edit K1–K4, zK2, zK3 and eK1–eK4 live, with validation
+  and limits. Changes apply immediately but are only written to EEPROM when
+  you press Save. There is also a Restore Defaults button.
 
-The same for K2, K3. Send "i", "s".
+Set your own access-point password in `esp32_cube_enc/web_interface.cpp`
+(`WIFI_PASSWORD`). WPA2 requires at least 8 characters — a shorter one
+means the network never starts.
+
+Bluetooth has been removed: it was 40% of the firmware image, the web
+interface replaced everything it did, and Espressif rates a simultaneous
+SoftAP + Bluetooth Classic as unstable on the ESP32's shared radio.
 
 <img src="/pictures/cube1.jpg" alt="Self-Balancing-Cube"/>
 
@@ -49,10 +63,16 @@ You can also make this balancing cube with Arduino nano controller. All other pa
 
 <img src="/pictures/arduino_schematic.png" alt="Self-Balancing-Cube-Schematic"/>
 
-In this version I make offsets setting procedure more simple. First connect to controller over bluetooth. 
-You will see a message that you need to calibrate the balancing points. Send c+ from serial monitor. This activate calibrating procedure. 
-Set the cube to one of balancing points (edge or vertex). Hold still when the cube does not fall to either side. Send c- from serial monitor. 
-This will write the offsets to the EEPROM. Repeat this procedure four times (3 edges and vertex). After calibrating all offsets, the cube will begin to balance.
+In this version I make offsets setting procedure more simple. Calibrate from
+the web dashboard: open the **Calibration** section, press **Start**, set the
+cube on a vertex and press **Capture pose**, then set it on an edge and
+capture again. The second capture writes the offsets to EEPROM automatically.
+The dashboard shows the raw accelerometer counts and tells you whether each
+pose was accepted.
+
+The same `c+` / `c-` commands still work over **USB serial** as a wired
+fallback, for when the access point is unavailable. Calibration is refused
+while the cube is actively balancing — disarm first.
 
 ESP32 version also has an updated balancing point setting procedure. Important! In this video you can learn how to set the balancing points:
 

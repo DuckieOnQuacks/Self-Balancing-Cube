@@ -1,4 +1,4 @@
-// web_interface.ino — phone-accessible Wi-Fi control panel for the cube.
+// web_interface.cpp — phone-accessible Wi-Fi control panel for the cube.
 //
 // The ESP32 runs its own Wi-Fi ACCESS POINT (no router or internet needed):
 // connect a phone to the "Cube-Control" network, then open the IP address
@@ -8,13 +8,15 @@
 //  * HTTP handlers must never call motor-control functions directly and
 //    must never block.  They only read shared state (later phases will set
 //    request flags that the main control loop acts on).
-//  * The balancing loop in esp32_cube_enc.ino stays fully independent:
+//  * The balancing loop in esp32_cube_enc.cpp stays fully independent:
 //    loop() just calls handleWebInterface(), which returns immediately
 //    when no client is waiting.
 //
 // Only built-in ESP32 Arduino libraries are used here.
+#include "ESP32.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <EEPROM.h>
 
 // Access-point credentials.  Change the password before real use;
 // WPA2 requires it to be at least 8 characters long.
@@ -232,6 +234,9 @@ transition:none!important}}
 
 <details><summary>Calibration</summary><div class="bd">
 <p class="note" id="ch">—</p>
+<p class="note" id="cr" style="color:var(--live)"></p>
+<p class="note" id="raw" style="font-family:ui-monospace,monospace;font-size:11px">
+raw</p>
 <div class="ab" style="margin:0">
 <button class="b" id="cstart">Start</button>
 <button class="b" id="ccap">Capture pose</button>
@@ -294,6 +299,10 @@ function poll(){
    (!d.calibrating?'Idle. Press Start to begin.':
    (!d.vertex_calibrated?'Step 1 — set the cube on a VERTEX, then capture.':
     'Step 2 — set the cube on an EDGE, then capture. Saves automatically.'));
+  // Result of the last capture, plus the raw counts the pose test actually
+  // uses. Both used to be Bluetooth-only.
+  $('cr').textContent=d.cal_result||'';
+  $('raw').textContent='raw  X '+d.acX+'   Y '+d.acY+'   Z '+d.acZ;
   $('s').textContent='live';
  }).catch(function(){$('s').textContent='no signal';})
  .then(function(){busy=false;});
@@ -381,8 +390,11 @@ void handleRoot() {
 void handleApiState() {
   // Fixed stack buffer instead of String concatenation: bounded memory and
   // no heap fragmentation on a long-running controller.
-  char json[512];
-  snprintf(json, sizeof(json),
+  // 640 rather than 512: the raw accelerometer values and cal_result string
+  // added when Bluetooth was removed push the worst case past the old size,
+  // and snprintf truncates silently - which would emit malformed JSON.
+  char json[640];
+  int n = snprintf(json, sizeof(json),
     "{"
       "\"robot_angleX\":%.3f,"
       "\"robot_angleY\":%.3f,"
@@ -400,7 +412,15 @@ void handleApiState() {
       "\"calibrating\":%s,"
       "\"vertex_calibrated\":%s,"
       "\"armed\":%s,"
-      "\"batt_voltage\":%.2f"
+      "\"batt_voltage\":%.2f,"
+      // Raw accelerometer counts.  During a first-time calibration the
+      // corrected angles above are computed from EEPROM garbage, so these
+      // are the only trustworthy numbers - and the pose accept/reject
+      // thresholds are applied to exactly these values.
+      "\"acX\":%d,"
+      "\"acY\":%d,"
+      "\"acZ\":%d,"
+      "\"cal_result\":\"%s\""
     "}",
     robot_angleX, robot_angleY,
     gyroXfilt, gyroYfilt, gyroZ,
@@ -413,7 +433,15 @@ void handleApiState() {
     calibrating       ? "true" : "false",
     vertex_calibrated ? "true" : "false",
     armed             ? "true" : "false",
-    batt_voltage);
+    batt_voltage,
+    AcX, AcY, AcZ, cal_result);
+  // Truncated JSON would be malformed, so refuse to send it rather than let
+  // the dashboard silently fail to parse.
+  if (n < 0 || n >= (int)sizeof(json)) {
+    webServer.send(500, "application/json",
+                   "{\"ok\":false,\"error\":\"state buffer overflow\"}");
+    return;
+  }
   webServer.send(200, "application/json", json);
 }
 
@@ -560,6 +588,12 @@ void startWebInterface() {
   if (!WiFi.softAP(WIFI_NAME, WIFI_PASSWORD)) {
     Serial.println("ERROR: Wi-Fi AP failed to start!"
                    "  (password must be at least 8 characters)");
+    // No AP means no dashboard, and therefore no SAFE STOP button.  Do not
+    // leave the cube able to spin up three reaction wheels with no reachable
+    // way to stop it: disarm, and let the operator re-arm over USB serial
+    // once they can see what is going on.
+    armed = false;
+    Serial.println("Balancing disarmed: no web interface available.");
     return;                                // no AP: skip starting the server
   }
 
