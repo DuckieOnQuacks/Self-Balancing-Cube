@@ -116,6 +116,25 @@ long currentT, previousT_1, previousT_2;
 // Stored here so the web interface can report it through /api/state.
 float batt_voltage = 0;
 
+// --- Web command interface (see web_interface.ino) ---------------------
+// HTTP handlers never touch the motors.  They only store a request here,
+// and the main control loop acts on it at the start of a control cycle.
+#define WEB_CMD_NONE    0
+#define WEB_CMD_STOP    1    // stop now, engage brake, and disarm
+#define WEB_CMD_DISARM  2    // disarm (same effect; separate for clarity)
+#define WEB_CMD_ARM     3    // allow balancing again
+#define WEB_CMD_CAL_START   4  // begin calibration (same as Bluetooth "c+")
+#define WEB_CMD_CAL_CAPTURE 5  // record the current pose (same as "c-")
+#define WEB_CMD_CAL_SAVE    6  // write the offsets to EEPROM
+// volatile because it is written by an HTTP handler and read by the loop.
+volatile uint8_t web_cmd_pending = WEB_CMD_NONE;
+
+// Master enable for balancing.  Defaults to true so the cube behaves exactly
+// as before unless the web interface explicitly disarms it.  While false,
+// the control loop takes its normal "not balancing" path: no drive, brake
+// engaged.  Only an ARM command or a restart clears it.
+bool armed = true;
+
 // Encoder counts are modified inside interrupt handlers, so they must be
 // volatile.  The main loop periodically copies and resets them.
 volatile int  enc_count1 = 0, enc_count2 = 0, enc_count3 = 0;

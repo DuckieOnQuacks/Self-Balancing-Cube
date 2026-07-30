@@ -46,6 +46,10 @@ background:#3a4150}
 #stop{width:100%;padding:20px;font-size:1.3rem;font-weight:700;color:#fff;
 background:#c62828;border:0;border-radius:10px;letter-spacing:.05em}
 #stop:active{background:#8e1f1f}
+.ab{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.b{padding:14px;font-size:1rem;font-weight:600;color:#e8eaed;background:#2c333f;
+border:0;border-radius:8px}
+.b:active{background:#3a4150}
 #s{font-size:.75rem;color:#9aa3af;margin-top:10px;text-align:center}
 </style></head><body>
 <h1>Self-Balancing Cube</h1>
@@ -57,10 +61,21 @@ background:#c62828;border:0;border-radius:10px;letter-spacing:.05em}
 <div class="c"><div class="k">Motor 3</div><div class="v" id="m3">-</div></div>
 <div class="c"><div class="k">Battery</div><div class="v" id="bv">-</div></div>
 <div class="c f"><div class="k">Status</div><div class="v">
-<span class="p" id="cal">calibration</span> <span class="p" id="mode">mode</span>
+<span class="p" id="armed">armed</span> <span class="p" id="cal">calibration</span>
+<span class="p" id="mode">mode</span>
 </div></div>
 </div>
 <button id="stop">SAFE STOP</button>
+<div class="ab"><button class="b" id="arm">ARM</button>
+<button class="b" id="disarm">DISARM</button></div>
+<div class="c" style="margin-top:12px">
+<div class="k">Calibration</div>
+<div id="ch" style="font-size:.8rem;color:#9aa3af;margin:6px 0 8px">-</div>
+<div class="ab" style="margin:0">
+<button class="b" id="cstart">START</button>
+<button class="b" id="ccap">CAPTURE POSE</button></div>
+<button class="b" id="csave" style="width:100%;margin-top:8px">SAVE CALIBRATION</button>
+</div>
 <div id="s">connecting...</div>
 <script>
 var busy=false;                        // one request at a time: the ESP32
@@ -77,24 +92,47 @@ function poll(){
   document.getElementById('m2').textContent=d.motor2_speed;
   document.getElementById('m3').textContent=d.motor3_speed;
   document.getElementById('bv').textContent=d.batt_voltage.toFixed(2)+' V';
+  pill(document.getElementById('armed'),d.armed,d.armed?'ARMED':'DISARMED');
   pill(document.getElementById('cal'),d.calibrated,
        d.calibrating?'CALIBRATING':(d.calibrated?'CALIBRATED':'NOT CALIBRATED'));
   var m=d.vertical_vertex?'VERTEX':(d.vertical_edge?'EDGE':'IDLE');
   pill(document.getElementById('mode'),d.vertical_vertex||d.vertical_edge,m);
+  // Tell the user which calibration step comes next.  Calibration is
+  // blocked while balancing, so say that instead when it applies.
+  var bal=d.armed&&(d.vertical_vertex||d.vertical_edge)&&d.calibrated
+          &&!d.calibrating;
+  document.getElementById('ch').textContent=
+   bal?'Balancing - press DISARM before calibrating':
+   (!d.calibrating?'Idle. Press START to begin.':
+   (!d.vertex_calibrated?'Step 1: set cube on VERTEX, press CAPTURE POSE':
+    'Step 2: set cube on EDGE, press CAPTURE POSE (saves automatically)'));
   document.getElementById('s').textContent='live';
  }).catch(function(){document.getElementById('s').textContent='disconnected';})
  .then(function(){busy=false;});
 }
 setInterval(poll,300);                 // 300 ms refresh (spec: 250-500 ms)
 poll();
-document.getElementById('stop').onclick=function(){
- // Sends a command request only; the main control loop acts on it.
+// Sends a command request only; the main control loop acts on it.
+function send(cmd){
  fetch('/api/command',{method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
-  body:'cmd=stop'})
+  body:'cmd='+cmd})
  .then(function(r){document.getElementById('s').textContent=
-   r.ok?'STOP sent':'STOP failed ('+r.status+')';})
- .catch(function(){document.getElementById('s').textContent='STOP failed';});
+   r.ok?cmd.toUpperCase()+' sent':cmd.toUpperCase()+' failed ('+r.status+')';})
+ .catch(function(){document.getElementById('s').textContent=
+   cmd.toUpperCase()+' failed';});
+}
+document.getElementById('stop').onclick=function(){send('stop');};
+document.getElementById('disarm').onclick=function(){send('disarm');};
+// Arming re-enables balancing, so require a deliberate confirmation.
+document.getElementById('arm').onclick=function(){
+ if(confirm('Arm the cube? Balancing will resume.'))send('arm');
+};
+document.getElementById('cstart').onclick=function(){send('cal_start');};
+document.getElementById('ccap').onclick=function(){send('cal_capture');};
+// Saving writes EEPROM, so confirm before spending a write cycle.
+document.getElementById('csave').onclick=function(){
+ if(confirm('Save calibration to EEPROM?'))send('cal_save');
 };
 </script></body></html>)rawliteral";
 
@@ -129,6 +167,8 @@ void handleApiState() {
       "\"vertical_edge\":%s,"
       "\"calibrated\":%s,"
       "\"calibrating\":%s,"
+      "\"vertex_calibrated\":%s,"
+      "\"armed\":%s,"
       "\"batt_voltage\":%.2f"
     "}",
     robot_angleX, robot_angleY,
@@ -139,8 +179,63 @@ void handleApiState() {
     vertical_vertex ? "true" : "false",
     vertical_edge   ? "true" : "false",
     calibrated      ? "true" : "false",
-    calibrating     ? "true" : "false",
+    calibrating       ? "true" : "false",
+    vertex_calibrated ? "true" : "false",
+    armed             ? "true" : "false",
     batt_voltage);
+  webServer.send(200, "application/json", json);
+}
+
+// POST /api/command  — accepts "cmd=stop", "cmd=disarm" or "cmd=arm".
+//
+// SAFETY: this handler does not command the motors and does not change the
+// balancing state itself.  It only records a request; the main control loop
+// applies it at the start of its next cycle (within one 15 ms period).
+void handleApiCommand() {
+  if (!webServer.hasArg("cmd")) {
+    webServer.send(400, "application/json",
+                   "{\"ok\":false,\"error\":\"missing cmd\"}");
+    return;
+  }
+  String cmd = webServer.arg("cmd");
+
+  uint8_t req;
+  bool is_cal = false;               // calibration commands are restricted
+  if (cmd == "stop")        req = WEB_CMD_STOP;
+  else if (cmd == "disarm") req = WEB_CMD_DISARM;
+  else if (cmd == "arm")    req = WEB_CMD_ARM;
+  else if (cmd == "cal_start")   { req = WEB_CMD_CAL_START;   is_cal = true; }
+  else if (cmd == "cal_capture") { req = WEB_CMD_CAL_CAPTURE; is_cal = true; }
+  else if (cmd == "cal_save")    { req = WEB_CMD_CAL_SAVE;    is_cal = true; }
+  else {
+    // Reject anything unrecognised rather than silently ignoring it.
+    webServer.send(400, "application/json",
+                   "{\"ok\":false,\"error\":\"unknown cmd\"}");
+    return;
+  }
+
+  // Never calibrate while the motors are actively balancing.  Rejecting here
+  // gives the user immediate feedback; the control loop re-checks before
+  // acting, since the cube could start balancing in between.
+  if (is_cal && balancingActive()) {
+    webServer.send(409, "application/json",
+                   "{\"ok\":false,\"error\":\"cannot calibrate while balancing"
+                   " - disarm first\"}");
+    return;
+  }
+
+  // A stop already waiting to be processed always wins.  Without this, an
+  // arm arriving in the same 15 ms window could overwrite a pending stop
+  // and the cube would never stop at all.
+  if (web_cmd_pending == WEB_CMD_STOP && req != WEB_CMD_STOP) {
+    webServer.send(409, "application/json",
+                   "{\"ok\":false,\"error\":\"stop pending\"}");
+    return;
+  }
+  web_cmd_pending = req;
+
+  char json[64];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"cmd\":\"%s\"}", cmd.c_str());
   webServer.send(200, "application/json", json);
 }
 
@@ -166,6 +261,7 @@ void startWebInterface() {
 
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/api/state", HTTP_GET, handleApiState);
+  webServer.on("/api/command", HTTP_POST, handleApiCommand);
   webServer.begin();
 }
 

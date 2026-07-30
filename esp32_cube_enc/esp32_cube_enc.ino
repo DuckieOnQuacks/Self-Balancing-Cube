@@ -130,8 +130,51 @@ void loop() {
     threeWay_to_XY(motor1_speed, motor2_speed, motor3_speed);
     motors_speed_Z = motor1_speed + motor2_speed + motor3_speed;
     
+    // Act on any command left by the web interface.  This runs after
+    // angle_calc() (which can set the pose flags) and before the balancing
+    // branches below, so a stop cannot be undone within the same iteration.
+    // The motors are never touched here: clearing these flags routes the
+    // control loop into its existing "not balancing" branch, which stops
+    // the drive and engages the brake.
+    switch (web_cmd_pending) {
+      case WEB_CMD_STOP:
+      case WEB_CMD_DISARM:
+        armed = false;              // blocks balancing until re-armed
+        vertical_vertex = false;    // forget the current upright pose
+        vertical_edge = false;
+        break;
+      case WEB_CMD_ARM:
+        armed = true;
+        // Leave the pose flags cleared: angle_calc() re-detects an upright
+        // pose only within its tight angle window, so arming can never make
+        // the cube jump straight back into balancing from a stale pose.
+        vertical_vertex = false;
+        vertical_edge = false;
+        break;
+      // Calibration commands run the same functions as the Bluetooth "c+"
+      // and "c-" commands.  Each is refused while the cube is actively
+      // balancing; the HTTP handler checks this too, but it is re-checked
+      // here because the cube may have started balancing in between.
+      case WEB_CMD_CAL_START:
+        if (!balancingActive() && !calibrating) calStart();
+        break;
+      case WEB_CMD_CAL_CAPTURE:
+        // Only meaningful once calibration has been started.
+        if (!balancingActive() && calibrating) calCapture();
+        break;
+      case WEB_CMD_CAL_SAVE:
+        // Commit the offsets recorded so far.  A normal two-pose
+        // calibration already saves automatically after the edge pose;
+        // this is for saving explicitly from the dashboard.
+        if (!balancingActive() && calibrating && vertex_calibrated) save();
+        break;
+    }
+    web_cmd_pending = WEB_CMD_NONE; // request consumed
+
     // Vertex mode controls two tilt axes and the common Z rotation axis.
-    if (vertical_vertex && calibrated && !calibrating) {    
+    // "armed" gates both balancing branches; when false the else branch
+    // below stops the motors and engages the brake.
+    if (armed && vertical_vertex && calibrated && !calibrating) {
       digitalWrite(BRAKE, HIGH);
       gyroX = GyX / 131.0;
       gyroY = GyY / 131.0;
@@ -151,7 +194,7 @@ void loop() {
       motors_speed_Y += speed_Y / 5;
       // Transform desired X/Y/Z forces into the three motor commands.
       XYZ_to_threeWay(-pwm_X, pwm_Y, -pwm_Z);
-    } else if (vertical_edge && calibrated && !calibrating) {
+    } else if (armed && vertical_edge && calibrated && !calibrating) {
       // In edge mode, only motor 3 is used to correct the detected tilt.
       digitalWrite(BRAKE, HIGH);
       gyroX = GyX / 131.0;

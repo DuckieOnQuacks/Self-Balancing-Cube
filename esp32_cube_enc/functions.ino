@@ -264,6 +264,65 @@ void ENC3_READ() {
   }
 }
 
+void calStart() {
+  // Calibration is a two-step process: record a valid vertex first,
+  // then record a valid edge and save both offsets to EEPROM.
+  // Extracted from Tuning() so the Bluetooth and web interfaces run the
+  // exact same calibration code rather than two copies that could drift.
+  calibrating = true;
+  SerialBT.println("Calibrating on.");
+  SerialBT.println("Set the cube on vertex...");
+  leds[0] = CRGB(250, 250, 0);
+  leds[1] = CRGB(250, 250, 0);
+  leds[2] = CRGB(250, 250, 0);
+  FastLED.show();
+}
+
+void calCapture() {
+  // Record whichever pose the cube is currently in.  Shared by the
+  // Bluetooth "c-" command and the web interface's Capture Pose button.
+  SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
+  // Vertex pose: gravity is mostly along Z, so X and Y are near zero.
+  if (abs(AcX) < 2000 && abs(AcY) < 2000) {
+    offsets.ID = 96;
+    offsets.acXv = AcX;
+    offsets.acYv = AcY;
+    offsets.acZv = AcZ + 16384;
+    SerialBT.println("Vertex OK.");
+    SerialBT.println("Set the cube on edge...");
+    vertex_calibrated = true;
+    leds[0] = CRGB(0, 250, 250);
+    leds[1] = CRGB(0, 250, 250);
+    leds[2] = CRGB(0, 250, 250);
+    FastLED.show();
+    beep();
+  // Edge pose: X has a characteristic gravity reading and Y remains
+  // near zero.  Refuse edge calibration until the vertex was accepted.
+  } else if (abs(AcX) > 7000 && abs(AcX) < 10000 && abs(AcY) < 2000 && vertex_calibrated) {
+    SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
+    SerialBT.println("Edge OK.");
+    offsets.acXe = AcX;
+    offsets.acYe = AcY;
+    offsets.acZe = AcZ + 16384;
+    leds[0] = CRGB::Black;
+    leds[1] = CRGB::Black;
+    leds[2] = CRGB::Black;
+    FastLED.show();
+    save();
+  } else {
+    SerialBT.println("The angles are wrong!!!");
+    beep();
+    beep();
+  }
+}
+
+// True while the control loop is actively driving the motors to balance.
+// Mirrors the balancing branch conditions in loop(); calibration commands
+// are refused while this is true.
+bool balancingActive() {
+  return armed && (vertical_vertex || vertical_edge) && calibrated && !calibrating;
+}
+
 int Tuning() {
   // Bluetooth commands are two characters: a parameter followed by an
   // action.  For example, c+ starts calibration and c- records a pose.
@@ -274,52 +333,12 @@ int Tuning() {
   switch (param) {
     case 'c':
       if (cmd == '+' && !calibrating) {
-        // Calibration is a two-step process: record a valid vertex first,
-        // then record a valid edge and save both offsets to EEPROM.
-        calibrating = true;
-        SerialBT.println("Calibrating on.");
-        SerialBT.println("Set the cube on vertex...");
-        leds[0] = CRGB(250, 250, 0);
-        leds[1] = CRGB(250, 250, 0);
-        leds[2] = CRGB(250, 250, 0);
-        FastLED.show();
+        calStart();
       }
       if (cmd == '-' && calibrating)  {
-        SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
-        // Vertex pose: gravity is mostly along Z, so X and Y are near zero.
-        if (abs(AcX) < 2000 && abs(AcY) < 2000) {
-          offsets.ID = 96;
-          offsets.acXv = AcX;
-          offsets.acYv = AcY;
-          offsets.acZv = AcZ + 16384;
-          SerialBT.println("Vertex OK.");
-          SerialBT.println("Set the cube on edge...");
-          vertex_calibrated = true;
-          leds[0] = CRGB(0, 250, 250);
-          leds[1] = CRGB(0, 250, 250);
-          leds[2] = CRGB(0, 250, 250);
-          FastLED.show();
-          beep();
-        // Edge pose: X has a characteristic gravity reading and Y remains
-        // near zero.  Refuse edge calibration until the vertex was accepted.
-        } else if (abs(AcX) > 7000 && abs(AcX) < 10000 && abs(AcY) < 2000 && vertex_calibrated) {
-          SerialBT.print("X: "); SerialBT.print(AcX); SerialBT.print(" Y: "); SerialBT.print(AcY); SerialBT.print(" Z: "); SerialBT.println(AcZ + 16384);
-          SerialBT.println("Edge OK.");
-          offsets.acXe = AcX;
-          offsets.acYe = AcY;
-          offsets.acZe = AcZ + 16384;
-          leds[0] = CRGB::Black;
-          leds[1] = CRGB::Black;
-          leds[2] = CRGB::Black;
-          FastLED.show();
-          save();
-        } else {
-          SerialBT.println("The angles are wrong!!!");
-          beep();
-          beep();
-        }
+        calCapture();
       }
-      break;              
+      break;
    }
    return 1;
 }
