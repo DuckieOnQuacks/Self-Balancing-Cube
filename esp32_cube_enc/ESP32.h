@@ -36,7 +36,20 @@
 #define accSens 0            // 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g
 #define gyroSens 0           // 0 = ±250°/s, 1 = ±500°/s, 2 = ±1000°/s, 3 = ±2000°/s
 
-#define EEPROM_SIZE   64
+// Was 64.  The offsets struct occupies bytes 0-27; the tuning gains are
+// stored after it, so the allocation needs to be larger.  The ESP32 EEPROM
+// library is NVS-backed and expands in place, so existing saved calibration
+// data is preserved when this grows.
+#define EEPROM_SIZE   128
+
+// Tuning gains are saved after the offsets struct.
+#define GAINS_EEPROM_ADDR 32
+#define NUM_GAINS         10
+#define GAINS_ID          0x6A   // marks a valid saved gain set
+struct GainsObj {
+  int   ID;
+  float v[NUM_GAINS];
+};
 
 #define LED_PIN       19     // Pin that connects to WS2812B
 #define NUM_PIXELS    3      // The number of LEDs (pixels) on WS2812B
@@ -126,8 +139,16 @@ float batt_voltage = 0;
 #define WEB_CMD_CAL_START   4  // begin calibration (same as Bluetooth "c+")
 #define WEB_CMD_CAL_CAPTURE 5  // record the current pose (same as "c-")
 #define WEB_CMD_CAL_SAVE    6  // write the offsets to EEPROM
+#define WEB_CMD_GAINS_SAVE  7  // write the current gains to EEPROM
 // volatile because it is written by an HTTP handler and read by the loop.
 volatile uint8_t web_cmd_pending = WEB_CMD_NONE;
+
+// Entry points implemented in web_interface.ino.  Declared explicitly
+// because Arduino's automatic prototype generation stops emitting
+// declarations for functions defined after the dashboard's large raw-string
+// literal, which leaves setup()/loop() unable to see these.
+void startWebInterface();
+void handleWebInterface();
 
 // Master enable for balancing.  Defaults to true so the cube behaves exactly
 // as before unless the web interface explicitly disarms it.  While false,

@@ -98,8 +98,12 @@ void setup() {
   // EEPROM data survives power cycles, so calibration is normally needed only
   // after changing the hardware or clearing the EEPROM.
   EEPROM.get(0, offsets);
-  if (offsets.ID == 96) 
+  if (offsets.ID == 96)
     calibrated = true;
+
+  // Restore any tuning gains saved from the web interface.  If none were
+  // ever saved, the compiled-in defaults stay in force.
+  loadGains();
 
   delay(200);
   // Configure the MPU6050 and measure the gyro's stationary bias.
@@ -167,6 +171,12 @@ void loop() {
         // calibration already saves automatically after the edge pose;
         // this is for saving explicitly from the dashboard.
         if (!balancingActive() && calibrating && vertex_calibrated) save();
+        break;
+      case WEB_CMD_GAINS_SAVE:
+        // Persist the gains currently in use.  Editing gains from the
+        // dashboard only changes RAM; the EEPROM write happens here, once
+        // per explicit Save, so tuning never wears out the flash.
+        saveGains();
         break;
     }
     web_cmd_pending = WEB_CMD_NONE; // request consumed
