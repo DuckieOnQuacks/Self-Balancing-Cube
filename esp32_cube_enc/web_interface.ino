@@ -94,101 +94,208 @@ void saveGains() {
 // the cube's own access point and has no internet access to fetch assets.
 const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0e1216">
 <title>Cube Control</title><style>
-body{font-family:system-ui,sans-serif;background:#14171c;color:#e8eaed;
-margin:0;padding:16px;-webkit-text-size-adjust:100%}
-h1{font-size:1.1rem;margin:0 0 12px;letter-spacing:.02em}
-.g{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px}
-.c{background:#1e232b;border-radius:8px;padding:10px 12px}
-.k{font-size:.7rem;text-transform:uppercase;color:#9aa3af;letter-spacing:.05em}
-.v{font-size:1.35rem;font-variant-numeric:tabular-nums;margin-top:2px}
-.f{grid-column:1/-1}
-.p{display:inline-block;padding:3px 9px;border-radius:999px;font-size:.85rem;
-background:#3a4150}
-.on{background:#1c7a3e}.off{background:#8a2b2b}
-#stop{width:100%;padding:20px;font-size:1.3rem;font-weight:700;color:#fff;
-background:#c62828;border:0;border-radius:10px;letter-spacing:.05em}
-#stop:active{background:#8e1f1f}
-.ab{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
-.b{padding:14px;font-size:1rem;font-weight:600;color:#e8eaed;background:#2c333f;
-border:0;border-radius:8px}
-.b:active{background:#3a4150}
-.gl{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px}
-.gr{display:flex;align-items:center;gap:6px}
-.gr span{font-size:.8rem;color:#9aa3af;width:2.4em}
-.gr input{flex:1;min-width:0;background:#14171c;color:#e8eaed;border:1px solid
-#3a4150;border-radius:6px;padding:7px;font-size:.9rem;font-variant-numeric:
-tabular-nums}
-.gr input:invalid{border-color:#c62828}
-#s{font-size:.75rem;color:#9aa3af;margin-top:10px;text-align:center}
+:root{--bg:#0e1216;--pnl:#161d24;--ln:#243039;--ink:#e8eff5;--dim:#7b8b99;
+--live:#ffab1f;--ok:#3ecf8e;--stop:#ff453a}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 16px/1.45
+system-ui,-apple-system,sans-serif;-webkit-text-size-adjust:100%;
+padding:16px 14px calc(20px + env(safe-area-inset-bottom))}
+/* placard labels: the engineering-instrument voice */
+.k{font-size:10px;text-transform:uppercase;letter-spacing:.16em;color:var(--dim)}
+/* header ------------------------------------------------------------ */
+header{display:flex;align-items:baseline;gap:8px;margin-bottom:16px}
+h1{font-size:13px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;
+margin:0;flex:1}
+#s{font-size:11px;color:var(--dim);text-align:right}
+#lamp{width:7px;height:7px;border-radius:50%;background:var(--ln);flex:none;
+align-self:center}
+#lamp.a{background:var(--live);animation:p 1.6s ease-in-out infinite}
+@keyframes p{50%{opacity:.25}}
+/* signature: attitude target with the three wheels at their real 120° */
+.inst{position:relative;width:100%;max-width:330px;margin:0 auto;
+aspect-ratio:1;display:grid;place-items:center}
+svg{width:76%;height:76%;overflow:visible}
+.ring{fill:none;stroke:var(--ln);stroke-width:1}
+.ring.o{stroke:#33414d}
+.ax{stroke:var(--ln);stroke-width:1;stroke-dasharray:2 5}
+#dot{fill:var(--live);transition:cx .12s linear,cy .12s linear,fill .2s}
+#dot.q{fill:var(--ok)}
+.tick{font:9px ui-monospace,monospace;fill:var(--dim);letter-spacing:.05em}
+/* three motor readouts, placed where the wheels actually are */
+.w{position:absolute;width:74px;text-align:center}
+.w.a{top:-2px;left:50%;transform:translateX(-50%)}      /* M3  top    */
+.w.b{bottom:2px;left:-2px}                              /* M1  lower left  */
+.w.c{bottom:2px;right:-2px}                             /* M2  lower right */
+.w b{display:block;font:400 17px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums;margin-top:3px}
+.bar{height:2px;background:var(--ln);margin-top:5px;border-radius:2px;
+overflow:hidden}
+.bar i{display:block;height:100%;width:0;background:var(--live);
+transition:width .15s linear}
+/* angle readouts ----------------------------------------------------- */
+.ang{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0 4px}
+.ang div{background:var(--pnl);border:1px solid var(--ln);border-radius:10px;
+padding:10px 12px}
+.ang b{display:block;font:300 30px/1.1 ui-monospace,SFMono-Regular,Menlo,monospace;
+font-variant-numeric:tabular-nums;letter-spacing:-.03em;margin-top:4px}
+/* status ------------------------------------------------------------- */
+.st{display:flex;flex-wrap:wrap;gap:6px;margin:14px 0}
+.p{font-size:11px;font-weight:600;letter-spacing:.1em;padding:5px 10px;
+border-radius:6px;background:var(--pnl);border:1px solid var(--ln);
+color:var(--dim)}
+.p.on{color:var(--ok);border-color:#1f4d3a}
+.p.live{color:var(--live);border-color:#5c4212}
+.p.off{color:var(--stop);border-color:#5c231f}
+/* controls ----------------------------------------------------------- */
+button{font-family:inherit;border:0;border-radius:10px;color:var(--ink);
+touch-action:manipulation;user-select:none}
+#stop{width:100%;min-height:76px;font-size:19px;font-weight:700;
+letter-spacing:.14em;color:#fff;background:var(--stop);
+box-shadow:0 6px 20px -8px var(--stop)}
+#stop:active{background:#c9302a;box-shadow:none}
+.ab{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+.b{min-height:48px;padding:12px;font-size:14px;font-weight:600;
+letter-spacing:.06em;background:var(--pnl);border:1px solid var(--ln)}
+.b:active{background:#1f2831}
+.b.w1{grid-column:1/-1}
+/* collapsible sections ----------------------------------------------- */
+details{background:var(--pnl);border:1px solid var(--ln);border-radius:10px;
+margin-top:10px}
+summary{padding:14px;font-size:12px;font-weight:600;letter-spacing:.14em;
+text-transform:uppercase;cursor:pointer;list-style:none;display:flex;
+align-items:center;gap:8px}
+summary::-webkit-details-marker{display:none}
+summary:after{content:'';width:6px;height:6px;border-right:1.5px solid var(--dim);
+border-bottom:1.5px solid var(--dim);transform:rotate(45deg);margin-left:auto;
+transition:transform .2s}
+details[open] summary:after{transform:rotate(-135deg)}
+.bd{padding:0 14px 14px}
+.note{font-size:12px;color:var(--dim);margin:0 0 12px}
+/* gain grid ---------------------------------------------------------- */
+.gl{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.gr{display:flex;align-items:center;gap:7px}
+.gr span{font:11px ui-monospace,monospace;color:var(--dim);width:2.6em;
+letter-spacing:.04em}
+.gr input{flex:1;min-width:0;background:var(--bg);color:var(--ink);
+border:1px solid var(--ln);border-radius:7px;padding:9px 8px;font:14px
+ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.gr input:focus{outline:2px solid var(--live);outline-offset:-1px;
+border-color:transparent}
+:focus-visible{outline:2px solid var(--live);outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;
+transition:none!important}}
 </style></head><body>
-<h1>Self-Balancing Cube</h1>
-<div class="g">
-<div class="c"><div class="k">Angle X</div><div class="v" id="ax">-</div></div>
-<div class="c"><div class="k">Angle Y</div><div class="v" id="ay">-</div></div>
-<div class="c"><div class="k">Motor 1</div><div class="v" id="m1">-</div></div>
-<div class="c"><div class="k">Motor 2</div><div class="v" id="m2">-</div></div>
-<div class="c"><div class="k">Motor 3</div><div class="v" id="m3">-</div></div>
-<div class="c"><div class="k">Battery</div><div class="v" id="bv">-</div></div>
-<div class="c f"><div class="k">Status</div><div class="v">
-<span class="p" id="armed">armed</span> <span class="p" id="cal">calibration</span>
-<span class="p" id="mode">mode</span>
-</div></div>
+
+<header><span id="lamp"></span><h1>Cube</h1><div id="s">connecting</div></header>
+
+<!-- Attitude target. The outer ring is the real +/-7 deg disengage limit from
+     angle_calc(); the radial scale is sqrt so the sub-degree angles seen while
+     balancing are actually visible. Motors sit at their true 120 deg spacing. -->
+<div class="inst">
+<svg viewBox="0 0 200 200" aria-hidden="true">
+<circle class="ring o" cx="100" cy="100" r="70"/>
+<circle class="ring" cx="100" cy="100" r="46"/>
+<circle class="ring" cx="100" cy="100" r="26"/>
+<line class="ax" x1="18" y1="100" x2="182" y2="100"/>
+<line class="ax" x1="100" y1="18" x2="100" y2="182"/>
+<circle class="ring" cx="100" cy="100" r="4"/>
+<text class="tick" x="103" y="70">3°</text>
+<text class="tick" x="103" y="26">7°</text>
+<circle id="dot" cx="100" cy="100" r="5"/>
+</svg>
+<div class="w a"><span class="k">M3</span><b id="m3">—</b>
+<div class="bar"><i id="b3"></i></div></div>
+<div class="w b"><span class="k">M1</span><b id="m1">—</b>
+<div class="bar"><i id="b1"></i></div></div>
+<div class="w c"><span class="k">M2</span><b id="m2">—</b>
+<div class="bar"><i id="b2"></i></div></div>
 </div>
+
+<div class="ang">
+<div><span class="k">Tilt X</span><b id="ax">—</b></div>
+<div><span class="k">Tilt Y</span><b id="ay">—</b></div>
+</div>
+
+<div class="st">
+<span class="p" id="armed">ARMED</span>
+<span class="p" id="cal">CALIBRATION</span>
+<span class="p" id="mode">MODE</span>
+<span class="p" id="bv">— V</span>
+</div>
+
 <button id="stop">SAFE STOP</button>
 <div class="ab"><button class="b" id="arm">ARM</button>
 <button class="b" id="disarm">DISARM</button></div>
-<div class="c" style="margin-top:12px">
-<div class="k">Calibration</div>
-<div id="ch" style="font-size:.8rem;color:#9aa3af;margin:6px 0 8px">-</div>
+
+<details><summary>Calibration</summary><div class="bd">
+<p class="note" id="ch">—</p>
 <div class="ab" style="margin:0">
-<button class="b" id="cstart">START</button>
-<button class="b" id="ccap">CAPTURE POSE</button></div>
-<button class="b" id="csave" style="width:100%;margin-top:8px">SAVE CALIBRATION</button>
-</div>
-<div class="c" style="margin-top:12px">
-<div class="k">Gains</div>
-<div id="gl" class="gl">loading...</div>
-<div class="ab" style="margin-top:10px">
-<button class="b" id="gapply">APPLY</button>
-<button class="b" id="gdef">RESTORE DEFAULTS</button></div>
-<button class="b" id="gsave" style="width:100%;margin-top:8px">SAVE GAINS TO EEPROM</button>
-<div id="gm" style="font-size:.75rem;color:#9aa3af;margin-top:8px">
-Changes apply immediately but are lost on restart until saved.</div>
-</div>
-<div id="s">connecting...</div>
+<button class="b" id="cstart">Start</button>
+<button class="b" id="ccap">Capture pose</button>
+<button class="b w1" id="csave">Save calibration</button></div>
+</div></details>
+
+<details><summary>Gains</summary><div class="bd">
+<div id="gl" class="gl">Loading…</div>
+<div class="ab">
+<button class="b" id="gapply">Apply</button>
+<button class="b" id="gdef">Restore defaults</button>
+<button class="b w1" id="gsave">Save to EEPROM</button></div>
+<p class="note" id="gm" style="margin:12px 0 0">Changes take effect at once.
+They are lost on restart until you save.</p>
+</div></details>
+
 <script>
+var $=function(i){return document.getElementById(i);};
 var busy=false;                        // one request at a time: the ESP32
                                        // WebServer serves a single client,
                                        // so never let polls pile up
-function pill(el,on,txt){el.textContent=txt;el.className='p '+(on?'on':'off');}
+var mmax=40;                           // motor bar full-scale, auto-ranging
+function pill(el,cls,txt){el.textContent=txt;el.className='p '+cls;}
+// Degrees -> radius. sqrt so 0.5 deg is visible while 7 deg lands on the ring.
+function rad(a){
+ var m=Math.min(Math.abs(a)/7,1);
+ return (a<0?-1:1)*Math.sqrt(m)*70;
+}
 function poll(){
  if(busy)return; busy=true;
  fetch('/api/state',{cache:'no-store'}).then(function(r){return r.json();})
  .then(function(d){
-  document.getElementById('ax').textContent=d.robot_angleX.toFixed(2)+'°';
-  document.getElementById('ay').textContent=d.robot_angleY.toFixed(2)+'°';
-  document.getElementById('m1').textContent=d.motor1_speed;
-  document.getElementById('m2').textContent=d.motor2_speed;
-  document.getElementById('m3').textContent=d.motor3_speed;
-  document.getElementById('bv').textContent=d.batt_voltage.toFixed(2)+' V';
-  pill(document.getElementById('armed'),d.armed,d.armed?'ARMED':'DISARMED');
-  pill(document.getElementById('cal'),d.calibrated,
+  $('ax').textContent=d.robot_angleX.toFixed(2)+'°';
+  $('ay').textContent=d.robot_angleY.toFixed(2)+'°';
+  $('dot').setAttribute('cx',100+rad(d.robot_angleX));
+  $('dot').setAttribute('cy',100-rad(d.robot_angleY));
+  // Green inside the vertex capture window, amber once it is drifting.
+  var q=Math.abs(d.robot_angleX)<0.4&&Math.abs(d.robot_angleY)<0.4;
+  $('dot').setAttribute('class',q?'q':'');  // SVG: className is read-only
+  var s=[d.motor1_speed,d.motor2_speed,d.motor3_speed];
+  mmax=Math.max(40,Math.abs(s[0]),Math.abs(s[1]),Math.abs(s[2]));
+  for(var i=0;i<3;i++){
+   $('m'+(i+1)).textContent=s[i];
+   $('b'+(i+1)).style.width=(Math.abs(s[i])/mmax*100)+'%';
+  }
+  $('bv').textContent=d.batt_voltage.toFixed(2)+' V';
+  $('lamp').className=d.armed?'a':'';
+  pill($('armed'),d.armed?'live':'off',d.armed?'ARMED':'DISARMED');
+  pill($('cal'),d.calibrated?'on':'off',
        d.calibrating?'CALIBRATING':(d.calibrated?'CALIBRATED':'NOT CALIBRATED'));
+  // Pose is detected even while disarmed, so only colour it when it can act.
   var m=d.vertical_vertex?'VERTEX':(d.vertical_edge?'EDGE':'IDLE');
-  pill(document.getElementById('mode'),d.vertical_vertex||d.vertical_edge,m);
+  pill($('mode'),(d.vertical_vertex||d.vertical_edge)&&d.armed?'live':'',m);
   // Tell the user which calibration step comes next.  Calibration is
   // blocked while balancing, so say that instead when it applies.
   var bal=d.armed&&(d.vertical_vertex||d.vertical_edge)&&d.calibrated
           &&!d.calibrating;
-  document.getElementById('ch').textContent=
-   bal?'Balancing - press DISARM before calibrating':
-   (!d.calibrating?'Idle. Press START to begin.':
-   (!d.vertex_calibrated?'Step 1: set cube on VERTEX, press CAPTURE POSE':
-    'Step 2: set cube on EDGE, press CAPTURE POSE (saves automatically)'));
-  document.getElementById('s').textContent='live';
- }).catch(function(){document.getElementById('s').textContent='disconnected';})
+  $('ch').textContent=
+   bal?'Balancing. Press DISARM before calibrating.':
+   (!d.calibrating?'Idle. Press Start to begin.':
+   (!d.vertex_calibrated?'Step 1 — set the cube on a VERTEX, then capture.':
+    'Step 2 — set the cube on an EDGE, then capture. Saves automatically.'));
+  $('s').textContent='live';
+ }).catch(function(){$('s').textContent='no signal';})
  .then(function(){busy=false;});
 }
 setInterval(poll,300);                 // 300 ms refresh (spec: 250-500 ms)
@@ -198,15 +305,14 @@ function send(cmd){
  fetch('/api/command',{method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
   body:'cmd='+cmd})
- .then(function(r){document.getElementById('s').textContent=
-   r.ok?cmd.toUpperCase()+' sent':cmd.toUpperCase()+' failed ('+r.status+')';})
- .catch(function(){document.getElementById('s').textContent=
-   cmd.toUpperCase()+' failed';});
+ .then(function(r){$('s').textContent=
+   r.ok?cmd.replace('_',' ')+' sent':cmd.replace('_',' ')+' failed '+r.status;})
+ .catch(function(){$('s').textContent=cmd.replace('_',' ')+' failed';});
 }
-document.getElementById('stop').onclick=function(){send('stop');};
-document.getElementById('disarm').onclick=function(){send('disarm');};
+$('stop').onclick=function(){send('stop');};
+$('disarm').onclick=function(){send('disarm');};
 // Arming re-enables balancing, so require a deliberate confirmation.
-document.getElementById('arm').onclick=function(){
+$('arm').onclick=function(){
  if(confirm('Arm the cube? Balancing will resume.'))send('arm');
 };
 // --- gain editing -----------------------------------------------------
@@ -222,7 +328,7 @@ function loadG(){
       '" type="number" step="any" min="'+g[k].lo+'" max="'+g[k].hi+
       '" value="'+(+g[k].v.toFixed(4))+'"></label>';
   }
-  document.getElementById('gl').innerHTML=h;
+  $('gl').innerHTML=h;
  });
 }
 loadG();
@@ -231,33 +337,32 @@ function applyG(){
  // Send every field; the firmware validates each one and rejects the whole
  // request if any is out of range.
  var b=[];
- for(var k in G){b.push(k+'='+document.getElementById('g_'+k).value);}
+ for(var k in G){b.push(k+'='+$('g_'+k).value);}
  fetch('/api/gains',{method:'POST',
   headers:{'Content-Type':'application/x-www-form-urlencoded'},
   body:b.join('&')})
  .then(function(r){return r.json().then(function(j){
-   document.getElementById('gm').textContent=
-    r.ok?'Applied. Not saved yet - press SAVE to keep after restart.'
-        :('Rejected: '+j.error);
+   $('gm').textContent=r.ok?'Applied. Save to keep them after a restart.'
+                           :('Rejected — '+j.error);
    if(r.ok)loadG();                    // re-read what the firmware accepted
   });})
- .catch(function(){document.getElementById('gm').textContent='Apply failed.';});
+ .catch(function(){$('gm').textContent='Apply failed.';});
 }
-document.getElementById('gapply').onclick=applyG;
-document.getElementById('gdef').onclick=function(){
+$('gapply').onclick=applyG;
+$('gdef').onclick=function(){
  // Restore Defaults just fills the form with the firmware's defaults and
  // applies them - still not saved until SAVE is pressed.
  if(!G||!confirm('Restore default gains?'))return;
- for(var k in G){document.getElementById('g_'+k).value=+G[k].d.toFixed(4);}
+ for(var k in G){$('g_'+k).value=+G[k].d.toFixed(4);}
  applyG();
 };
-document.getElementById('gsave').onclick=function(){
+$('gsave').onclick=function(){
  if(confirm('Save current gains to EEPROM?'))send('gains_save');
 };
-document.getElementById('cstart').onclick=function(){send('cal_start');};
-document.getElementById('ccap').onclick=function(){send('cal_capture');};
+$('cstart').onclick=function(){send('cal_start');};
+$('ccap').onclick=function(){send('cal_capture');};
 // Saving writes EEPROM, so confirm before spending a write cycle.
-document.getElementById('csave').onclick=function(){
+$('csave').onclick=function(){
  if(confirm('Save calibration to EEPROM?'))send('cal_save');
 };
 </script></body></html>)rawliteral";
