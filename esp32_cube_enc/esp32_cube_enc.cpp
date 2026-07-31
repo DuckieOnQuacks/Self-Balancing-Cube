@@ -77,6 +77,12 @@ float trimX = 0, trimY = 0;
 CRGB leds[NUM_PIXELS];
 const char* cal_result = "";   // see ESP32.h
 
+// Telemetry trace ring (see ESP32.h).  ~8 KB of the ~270 KB free heap;
+// statically allocated so a failed malloc can't silently disable tracing.
+TraceSample trace_buf[TRACE_LEN];
+uint32_t trace_seq = 0;
+int16_t trace_pwmX = 0, trace_pwmY = 0;
+
 void setup() {
   // ---- MOTOR SAFETY: this block must run before anything slow. ----
   // Until LEDC is attached, the PWM pins float, and this driver hardware
@@ -320,6 +326,8 @@ void loop() {
       motors_speed_Y += speed_Y / 5;
       // Transform desired X/Y/Z forces into the three motor commands.
       XYZ_to_threeWay(-pwm_X, pwm_Y, -pwm_Z);
+      trace_pwmX = pwm_X;          // captured for the telemetry trace
+      trace_pwmY = pwm_Y;
     } else if (armed && vertical_edge && calibrated && !calibrating) {
       // In edge mode, only motor 3 is used to correct the detected tilt.
       digitalWrite(BRAKE, HIGH);
@@ -337,6 +345,8 @@ void loop() {
 
       motors_speed_X += motor3_speed / 5;
       Motor3_control(pwm_X);
+      trace_pwmX = pwm_X;          // edge mode drives only the X effort
+      trace_pwmY = 0;
     } else {
       // If the cube is not in a recognized balancing pose, stop applying
       // drive and engage the brake.  This protects the motors during setup or
@@ -345,7 +355,12 @@ void loop() {
       digitalWrite(BRAKE, LOW);
       motors_speed_X = 0;
       motors_speed_Y = 0;
+      trace_pwmX = 0;              // no drive commanded while idle
+      trace_pwmY = 0;
     }
+    // Record this iteration into the telemetry trace, whichever branch ran:
+    // the moments around a fall are the ones worth plotting.
+    traceRecord();
     previousT_1 = currentT;
   }
   

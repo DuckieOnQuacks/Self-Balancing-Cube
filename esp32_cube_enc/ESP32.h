@@ -175,6 +175,30 @@ extern float batt_voltage;
 extern volatile float yaw_rate_request;
 extern float yaw_rate_cmd;
 
+// --- Telemetry trace ---------------------------------------------------
+// A ring buffer of one sample per control-loop iteration (66.7 Hz), so the
+// dashboard can plot the real dynamics instead of a 3.3 Hz alias of them.
+// The control loop writes; the /api/trace handler reads.  Single-core-safe
+// by construction: both run from loop(), never concurrently.
+//
+// 336 samples x 24 bytes = 8064 bytes of RAM, a 5 s window - enough to
+// cover many missed polls, since the browser accumulates the stream.
+#define TRACE_LEN 336
+struct TraceSample {
+  uint32_t seq;        // monotonically increasing sample number
+  uint32_t t_ms;       // millis() at capture
+  int16_t  angX10;     // robot_angleX * 100, centidegrees
+  int16_t  angY10;     // robot_angleY * 100
+  int16_t  gyrX10;     // gyroXfilt * 10
+  int16_t  gyrY10;     // gyroYfilt * 10
+  int16_t  m1, m2, m3; // wheel speeds, counts/loop
+  int16_t  pwmX, pwmY; // last commanded axis efforts (vertex mode)
+};
+extern TraceSample trace_buf[TRACE_LEN];
+extern uint32_t trace_seq;           // next sequence number to be written
+extern int16_t trace_pwmX, trace_pwmY;  // captured by the balancing branch
+void traceRecord();                  // append one sample (functions.cpp)
+
 // --- Balance-point auto-trim ------------------------------------------
 // The cube's true balance point is rarely at exactly zero degrees: the
 // centre of mass sits a little off the contact point.  Holding a setpoint

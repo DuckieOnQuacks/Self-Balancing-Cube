@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# generated at build time by tools/gzip_dashboard.py
+esp32_cube_enc/dashboard_gz.h

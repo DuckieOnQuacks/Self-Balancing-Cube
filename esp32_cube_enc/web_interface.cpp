@@ -17,6 +17,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <EEPROM.h>
+// Build-time gzipped copy of DASHBOARD_HTML below (generated, git-ignored).
+#include "dashboard_gz.h"
 
 // Access-point credentials.  Change the password before real use;
 // WPA2 requires it to be at least 8 characters long.
@@ -113,9 +115,11 @@ void saveGains() {
   Serial.println("Saved tuning gains and trim to EEPROM.");
 }
 
-// The dashboard page.  Stored in flash (PROGMEM) rather than RAM, and sent
-// with send_P() so it is streamed straight from flash — no RAM copy, no
-// String building.  Everything is inlined because the phone is connected to
+// The dashboard page.  This readable literal is the SOURCE, but it is not
+// what gets served: tools/gzip_dashboard.py compresses it into
+// dashboard_gz.h at every build, and handleRoot() sends that.  The linker's
+// --gc-sections drops this uncompressed copy from the binary since nothing
+// references it.  Everything is inlined because the phone is connected to
 // the cube's own access point and has no internet access to fetch assets.
 const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -299,6 +303,19 @@ points="100,170 158,112 100,54 42,112"/></g>
 <div class="ab"><button class="b" id="arm">ARM</button>
 <button class="b" id="disarm">DISARM</button></div>
 
+<details id="trc"><summary>Trace</summary><div class="bd">
+<canvas id="tc" width="640" height="200"
+ style="width:100%;height:150px;background:var(--bg);border:1px solid var(--ln);
+ border-radius:8px"></canvas>
+<div class="st" id="tl" style="margin:8px 0 0"></div>
+<div class="ab">
+<button class="b" id="tpause">Pause</button>
+<button class="b" id="tsave">Download CSV</button></div>
+<p class="note" id="tn">Live at the full 66.7 Hz control rate — the numeric
+readouts above only sample at 3.3 Hz. Open while tuning: oscillation means
+more damping (K2), slow wander means more angle gain (K1).</p>
+</div></details>
+
 <details><summary>Motion</summary><div class="bd">
 <div style="display:flex;justify-content:space-between;align-items:baseline">
 <span class="k">Yaw rate</span><b class="m" id="yv">0 °/s</b></div>
@@ -409,10 +426,87 @@ function poll(){
   // Don't erase a command result the user has not had time to read.
   if(Date.now()>msgUntil)$('s').textContent='live';
  }).catch(function(){$('s').textContent='no signal';})
+ // Chain the trace fetch AFTER the state response so there is never more
+ // than one request in flight - the ESP32 serves a single client.  Its
+ // failure must not mark the whole link down, hence the inner catch.
+ .then(function(){
+  if($('trc').open)return pollTrace().catch(function(){});
+ })
  .then(function(){busy=false;});
 }
 setInterval(poll,300);                 // 300 ms refresh (spec: 250-500 ms)
 poll();
+// --- telemetry trace --------------------------------------------------
+// Samples accumulate here at the full 66.7 Hz control rate; the chart is a
+// window onto the tail. Capped at 8000 samples (~2 min) to bound memory.
+var T=[],tSeq=0,tPause=false;
+// [csv column, colour, scale full-range, default on, label]
+var CH=[['ax','#ffab1f',800,1,'tilt X'],  // centidegrees, +/-8 deg window
+        ['ay','#3ecf8e',800,1,'tilt Y'],
+        ['gx','#9aa3af',2500,0,'gyro X'], // tenths of deg/s
+        ['gy','#58a6ff',2500,0,'gyro Y'],
+        ['px','#ff453a',255,1,'pwm X'],
+        ['py','#c084fc',255,0,'pwm Y'],
+        ['m3','#f97316',450,0,'wheel 3']];
+function pollTrace(){
+ return fetch('/api/trace?since='+tSeq,{cache:'no-store'})
+ .then(function(r){return r.text();})
+ .then(function(txt){
+  var rows=txt.trim().split('\n');
+  for(var i=1;i<rows.length;i++){       // row 0 is the header
+   var v=rows[i].split(',').map(Number);
+   if(v.length<11)continue;
+   // A gap in seq means the ring lapped us; break the line honestly.
+   if(T.length&&v[0]>tSeq+1)T.push(null);
+   tSeq=v[0];
+   T.push(v);
+  }
+  if(T.length>8000)T.splice(0,T.length-8000);
+  if(!tPause)drawTrace();
+ });
+}
+function drawTrace(){
+ var c=$('tc'),g=c.getContext('2d'),W=c.width,H=c.height;
+ g.clearRect(0,0,W,H);
+ g.strokeStyle='#243039';g.beginPath();          // zero line
+ g.moveTo(0,H/2);g.lineTo(W,H/2);g.stroke();
+ var N=400,start=Math.max(0,T.length-N);         // ~6 s window
+ CH.forEach(function(ch){
+  if(!ch[3])return;
+  var col={ax:2,ay:3,gx:4,gy:5,m1:6,m2:7,m3:8,px:9,py:10}[ch[0]];
+  g.strokeStyle=ch[1];g.beginPath();
+  var pen=false;
+  for(var i=start;i<T.length;i++){
+   var s=T[i];
+   if(!s){pen=false;continue;}                   // gap: lift the pen
+   var x=(i-start)/N*W;
+   var y=H/2-(s[col]/ch[2])*(H/2-4);
+   if(pen)g.lineTo(x,y);else{g.moveTo(x,y);pen=true;}
+  }
+  g.stroke();
+ });
+}
+// Legend chips double as channel toggles.
+CH.forEach(function(ch,i){
+ var b=document.createElement('span');
+ b.className='p'+(ch[3]?' on':'');
+ b.style.cursor='pointer';b.style.borderColor=ch[1];b.textContent=ch[4];
+ b.onclick=function(){ch[3]=ch[3]?0:1;b.className='p'+(ch[3]?' on':'');drawTrace();};
+ $('tl').appendChild(b);
+});
+$('tpause').onclick=function(){
+ tPause=!tPause;this.textContent=tPause?'Resume':'Pause';
+ if(!tPause)drawTrace();
+};
+$('tsave').onclick=function(){
+ // Rebuild CSV from everything accumulated, gaps marked as blank lines.
+ var out='seq,t,ax,ay,gx,gy,m1,m2,m3,px,py\n';
+ T.forEach(function(s){out+=s?s.join(',')+'\n':'\n';});
+ var a=document.createElement('a');
+ a.href=URL.createObjectURL(new Blob([out],{type:'text/csv'}));
+ a.download='cube-trace.csv';a.click();
+ URL.revokeObjectURL(a.href);
+};
 // --- button feedback --------------------------------------------------
 // A press has to be visibly acknowledged even over a slow AP link, so every
 // command button greys out while its request is in flight, then flashes the
@@ -529,9 +623,17 @@ bind('ccap','cal_capture');
 bind('csave','cal_save','Save calibration to EEPROM?');
 </script></body></html>)rawliteral";
 
-// GET /  — serve the dashboard straight from flash.
+// GET /  — serve the dashboard straight from flash, pre-gzipped at build
+// time (see tools/gzip_dashboard.py).  handleClient() pushes the whole page
+// synchronously from loop(), stalling the control loop for the duration of
+// the transfer, so the ~2.7x smaller gzip body directly shortens that stall.
+// Every browser since ~2000 accepts gzip; no fallback needed on a device
+// whose only clients are phones pointed at its own access point.
 void handleRoot() {
-  webServer.send_P(200, "text/html", DASHBOARD_HTML);
+  webServer.sendHeader("Content-Encoding", "gzip");
+  webServer.send_P(200, "text/html",
+                   reinterpret_cast<const char*>(DASHBOARD_GZ),
+                   DASHBOARD_GZ_LEN);
 }
 
 // GET /api/state  — read-only telemetry snapshot as JSON.
@@ -681,6 +783,51 @@ void handleApiGainsSet() {
   webServer.send(200, "application/json", json);
 }
 
+// GET /api/trace?since=N  — control-loop telemetry as CSV, one line per
+// 15 ms sample, starting after sequence number N.
+//
+// The browser polls this alongside /api/state and accumulates the stream,
+// so each response only carries the samples since the previous poll
+// (~20 lines, under one TCP segment).  It deliberately does NOT dump the
+// whole ring on demand: a multi-kilobyte response would stall the control
+// loop for several periods, which is exactly what the gzip work removed.
+// The seq column lets the client detect dropped samples honestly.
+void handleApiTrace() {
+  uint32_t since = 0;
+  if (webServer.hasArg("since"))
+    since = strtoul(webServer.arg("since").c_str(), NULL, 10);
+
+  // Clamp the request to what the ring still holds.  trace_seq is the next
+  // sequence to be written, so valid history is [trace_seq-TRACE_LEN,
+  // trace_seq).  A client that fell far behind just resumes from the oldest
+  // sample and sees the gap in the seq column.
+  uint32_t oldest = trace_seq > TRACE_LEN ? trace_seq - TRACE_LEN : 0;
+  uint32_t from = since + 1;
+  if (from < oldest) from = oldest;
+
+  // Cap one response at 40 samples (~1.6 KB) so a lagging client catches up
+  // over a few polls instead of provoking one long loop-stalling send.
+  uint32_t upto = trace_seq;
+  if (upto - from > 40) upto = from + 40;
+
+  // Worst-case line: 10-digit seq + 10-digit t + nine 6-char int16 fields
+  // plus separators = 86 chars.  Sized for that, not the typical ~45, so a
+  // batch is never silently shortened by large values.
+  static char csv[40 * 88 + 64];
+  int n = 0;
+  n += snprintf(csv + n, sizeof(csv) - n, "seq,t,ax,ay,gx,gy,m1,m2,m3,px,py\n");
+  for (uint32_t q = from; q < upto && n < (int)sizeof(csv) - 48; q++) {
+    TraceSample& s = trace_buf[q % TRACE_LEN];
+    if (s.seq != q) continue;          // overwritten mid-read: skip honestly
+    n += snprintf(csv + n, sizeof(csv) - n,
+                  "%lu,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                  (unsigned long)s.seq, (unsigned long)s.t_ms,
+                  s.angX10, s.angY10, s.gyrX10, s.gyrY10,
+                  s.m1, s.m2, s.m3, s.pwmX, s.pwmY);
+  }
+  webServer.send(200, "text/csv", csv);
+}
+
 // POST /api/command  — accepts "cmd=stop", "cmd=disarm" or "cmd=arm".
 //
 // SAFETY: this handler does not command the motors and does not change the
@@ -797,6 +944,7 @@ void startWebInterface() {
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/api/state", HTTP_GET, handleApiState);
   webServer.on("/api/command", HTTP_POST, handleApiCommand);
+  webServer.on("/api/trace", HTTP_GET, handleApiTrace);
   webServer.on("/api/gains", HTTP_GET, handleApiGains);
   webServer.on("/api/gains", HTTP_POST, handleApiGainsSet);
   webServer.begin();

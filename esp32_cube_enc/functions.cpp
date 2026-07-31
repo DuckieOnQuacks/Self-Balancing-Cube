@@ -341,6 +341,28 @@ void calCapture() {
   }
 }
 
+// Append one sample to the telemetry trace ring.  Called once at the end of
+// every control-loop iteration, balancing or not - a trace that stops when
+// the cube falls would hide exactly the moment worth looking at.  Fixed
+// point keeps the sample at 24 bytes; the dashboard rescales for display.
+void traceRecord() {
+  TraceSample& s = trace_buf[trace_seq % TRACE_LEN];
+  s.t_ms   = (uint32_t)currentT;
+  s.angX10 = (int16_t)constrain(robot_angleX * 100.0f, -32767.0f, 32767.0f);
+  s.angY10 = (int16_t)constrain(robot_angleY * 100.0f, -32767.0f, 32767.0f);
+  s.gyrX10 = (int16_t)constrain(gyroXfilt * 10.0f, -32767.0f, 32767.0f);
+  s.gyrY10 = (int16_t)constrain(gyroYfilt * 10.0f, -32767.0f, 32767.0f);
+  s.m1 = motor1_speed;
+  s.m2 = motor2_speed;
+  s.m3 = motor3_speed;
+  s.pwmX = trace_pwmX;
+  s.pwmY = trace_pwmY;
+  // seq is written LAST: a reader that sees the new seq is guaranteed the
+  // rest of the sample is already in place.
+  s.seq = trace_seq;
+  trace_seq++;
+}
+
 // True while the control loop is actively driving the motors to balance.
 // Mirrors the balancing branch conditions in loop(); calibration commands
 // are refused while this is true.
