@@ -16,6 +16,8 @@
 #include "ESP32.h"
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
+#include <ESPmDNS.h>
 #include <EEPROM.h>
 // Build-time gzipped copy of DASHBOARD_HTML below (generated, git-ignored).
 #include "dashboard_gz.h"
@@ -24,9 +26,20 @@
 // WPA2 requires it to be at least 8 characters long.
 const char* WIFI_NAME = "Cube-Control";
 const char* WIFI_PASSWORD = "poop1234";
+// mDNS name, so a laptop can use http://cube.local instead of the IP.
+// Phones mostly ignore mDNS; the captive portal below is what serves them.
+const char* MDNS_NAME = "cube";
 
 // HTTP server on the standard port, so plain http://<ip> works.
 WebServer webServer(80);
+
+// Captive-portal DNS: answers EVERY name lookup with the cube's own address.
+// Phones probe a known URL right after joining a network and show a "sign in"
+// notification when the answer is not what they expected - so pointing those
+// probes at this server is what makes the dashboard open by itself.
+// Hijacking all names is safe here precisely because this AP has no route
+// anywhere: there is nothing else on it to resolve.
+DNSServer dnsServer;
 
 // --- Tunable gains -----------------------------------------------------
 // One table describes every gain: where it lives, the range the web
@@ -60,6 +73,17 @@ const GainDef GAIN_DEFS[] = {
   // Negative values are allowed so the sign can be flipped from the web
   // interface if this hardware's encoder polarity is inverted.
   {"tK",  &tK, -0.5,   0.5,   0.0  },  // balance-point auto-trim rate
+  // APPENDED, not inserted: loadGains() matches saved values to this table
+  // by POSITION, so a new row may only go on the end or every gain after it
+  // reads back the wrong saved number.  Appending needs no GAINS_ID bump -
+  // the record stores its own count and older records simply leave this one
+  // at the default (see the ESP32.h note above GAINS_ID).
+  //
+  // Outer heading loop, °/s of yaw commanded per ° of heading error.  1.0
+  // approaches a target with a ~1 s time constant and saturates the ±90°/s
+  // rate clamp beyond 90° of error.  0 disables heading hold entirely,
+  // leaving the yaw command fully manual.
+  {"zK1", &zK1,  0.0,  10.0,  1.0  },  // heading hold
 };
 // Keep the table and the EEPROM record in step at compile time.
 static_assert(sizeof(GAIN_DEFS) / sizeof(GAIN_DEFS[0]) == NUM_GAINS,
@@ -213,6 +237,8 @@ button:disabled{opacity:.5}
 @keyframes fok{0%,55%{box-shadow:inset 0 0 0 2px var(--ok)}}
 @keyframes fer{0%,55%{box-shadow:inset 0 0 0 2px var(--stop)}}
 .b.w1{grid-column:1/-1}
+/* A button waiting for its second, confirming tap (see bind()). */
+.b.cf{color:var(--live);border-color:var(--live);background:#2a2011}
 /* collapsible sections ----------------------------------------------- */
 details{background:var(--pnl);border:1px solid var(--ln);border-radius:10px;
 margin-top:10px}
@@ -324,10 +350,23 @@ more damping (K2), slow wander means more angle gain (K1).</p>
 <p class="note">Spins the cube about its vertical axis while balancing.
 Returns to zero on stop, disarm or arm.</p>
 <div style="display:flex;justify-content:space-between;align-items:baseline">
+<span class="k">Heading</span><b class="m" id="hv">—</b></div>
+<div class="ab" style="margin:0">
+<button class="b" id="hhold">Hold heading</button>
+<button class="b" id="hfree">Release</button></div>
+<div class="ab">
+<button class="b" id="hl90">↺ 90°</button>
+<button class="b" id="hr90">↻ 90°</button>
+<button class="b" id="h180">↻ 180°</button></div>
+<p class="note" id="hn">Turns are relative to where the cube is pointing now.
+Heading is dead-reckoned from the gyro — no compass — so it drifts over
+minutes and resets each time the cube stands up.</p>
+<div style="display:flex;justify-content:space-between;align-items:baseline">
 <span class="k">Learned trim</span><b class="m" id="tv">—</b></div>
-<p class="note" id="tn">Auto-trim is off. Set the tK gain above zero to
-enable it.</p>
-<button class="b w1" id="treset">Reset trim</button>
+<p class="note" id="tnote">Auto-trim is off.</p>
+<div class="ab">
+<button class="b" id="ttog">Auto-trim</button>
+<button class="b" id="treset">Reset trim</button></div>
 <p class="note">Saved with the gains, so it applies from the next boot.
 Reset it after changing the cube's hardware, then save again.</p>
 </div></details>
@@ -352,6 +391,16 @@ raw</p>
 <p class="note" id="gm" style="margin:12px 0 0">Changes take effect at once.
 They are lost on restart until you save.</p>
 </div></details>
+
+<!-- A phone that arrived through the captive-portal notification is showing
+     this inside a cut-down sign-in browser, which suspends background
+     polling and blocks storage.  Always offer the real address rather than
+     trying to detect that browser - the detection is unreliable and the
+     line is useful information either way. -->
+<p class="note" style="text-align:center;margin:18px 0 4px">
+Opened from the Wi-Fi sign-in screen? For live telemetry open
+<a href="http://192.168.4.1/" style="color:var(--live)">192.168.4.1</a>
+in your browser — or <b>cube.local</b> on a computer.</p>
 
 <script>
 var $=function(i){return document.getElementById(i);};
@@ -415,14 +464,20 @@ function poll(){
   // uses. Both used to be Bluetooth-only.
   $('cr').textContent=d.cal_result||'';
   $('raw').textContent='raw  X '+d.acX+'   Y '+d.acY+'   Z '+d.acZ;
-  // Learned balance-point trim. Only meaningful once tK is above zero.
+  // Learned balance-point trim. Only meaningful once tK is non-zero.
   $('tv').textContent=d.trimX.toFixed(2)+'° / '+d.trimY.toFixed(2)+'°';
   var tk=G&&G.tK?G.tK.v:0;
-  $('tn').textContent=tk>0
-   ?'Auto-trim active (tK '+tk+'). Values settle as the cube balances.'
-   :'Auto-trim is off. Set the tK gain above zero to enable it.';
+  $('ttog').textContent='Auto-trim: '+(tk!=0?'ON':'OFF');
+  $('tnote').textContent=tk!=0
+   ?'Active (tK '+tk+'). Values settle as the cube balances.'
+   :'Off. Toggle on to learn the balance point while balancing.';
   // Reflect the firmware's actual yaw command unless the user is dragging.
   if(!dragging)$('yv').textContent=d.yaw_rate.toFixed(0)+' °/s';
+  // Heading only exists in vertex mode; say so rather than showing a stale
+  // number the firmware is not currently updating.
+  $('hv').textContent=d.vertical_vertex
+   ?d.robot_yaw.toFixed(0)+'°'+(d.yaw_hold?' · holding':'')
+   :'—';
   // Don't erase a command result the user has not had time to read.
   if(Date.now()>msgUntil)$('s').textContent='live';
  }).catch(function(){$('s').textContent='no signal';})
@@ -521,8 +576,10 @@ function flash(b,ok){
  b.classList.add(ok?'ok':'er');        // the same button is pressed again
 }
 // Sends a command request only; the main control loop acts on it.
-function send(cmd,b){
- var n=cmd.replace('_',' ');
+// cmd may carry extra form fields ("turn&deg=90"); label names it for the
+// status line when the raw body would read badly.
+function send(cmd,b,label){
+ var n=(label||cmd).replace('_',' ');
  // SAFE STOP is never disabled - a hung request must not make it unpressable.
  // Everything else re-enables on a watchdog in case no response ever arrives.
  if(b&&b.id!='stop'){b.disabled=true;
@@ -541,9 +598,32 @@ function send(cmd,b){
  .catch(function(){say(n+' failed');flash(b,false);});
 }
 // One binder for every command button, with an optional confirmation.
-function bind(id,cmd,ask){$(id).onclick=function(){
- if(ask&&!confirm(ask))return;
- send(cmd,this);};}
+//
+// The confirmation is IN-PAGE rather than confirm().  A browser stops
+// honouring confirm() once the user (or the browser itself) blocks further
+// dialogs, which happens after a couple in quick succession - so saving a
+// calibration and then pressing ARM left ARM silently dead: the handler
+// returned before sending anything, with no request, no error, and nothing
+// on screen.  Captive-portal sign-in browsers suppress dialogs outright,
+// which the portal added below makes far more likely to be what you are
+// looking at.  Two taps on the button itself cannot be suppressed by
+// anything, and keep the deliberate second action that makes ARM safe.
+function bind(id,cmd,ask,label){
+ var b=$(id),txt=b.textContent,t=0;
+ function reset(){
+  if(t)clearTimeout(t);
+  t=0;b.textContent=txt;b.classList.remove('cf');
+ }
+ b.onclick=function(){
+  if(ask&&!t){                          // first tap: ask, then wait
+   b.textContent='Confirm?';b.classList.add('cf');say(ask);
+   t=setTimeout(reset,4000);            // times out rather than staying armed
+   return;
+  }
+  reset();                              // second tap (or no confirmation)
+  send(cmd,this,label);
+ };
+}
 bind('stop','stop');
 bind('disarm','disarm');
 // Arming re-enables balancing, so require a deliberate confirmation.
@@ -585,13 +665,24 @@ function applyG(btn){
  .catch(function(){$('gm').textContent='Apply failed.';flash(btn,false);});
 }
 $('gapply').onclick=function(){applyG(this);};
-$('gdef').onclick=function(){
- // Restore Defaults just fills the form with the firmware's defaults and
- // applies them - still not saved until SAVE is pressed.
- if(!G||!confirm('Restore default gains?'))return;
- for(var k in G){$('g_'+k).value=+G[k].d.toFixed(4);}
- applyG(this);
-};
+// Restore Defaults just fills the form with the firmware's defaults and
+// applies them - still not saved until SAVE is pressed.  Two-tap confirm for
+// the same reason as bind(): confirm() is not dependable here.
+(function(){
+ var b=$('gdef'),txt=b.textContent,t=0;
+ b.onclick=function(){
+  if(!G)return;
+  if(!t){
+   b.textContent='Confirm?';b.classList.add('cf');
+   $('gm').textContent='Tap again to restore every gain to its default.';
+   t=setTimeout(function(){t=0;b.textContent=txt;b.classList.remove('cf');},4000);
+   return;
+  }
+  clearTimeout(t);t=0;b.textContent=txt;b.classList.remove('cf');
+  for(var k in G){$('g_'+k).value=+G[k].d.toFixed(4);}
+  applyG(this);
+ };
+})();
 bind('gsave','gains_save','Save gains and the learned trim to EEPROM?');
 // --- yaw slider -------------------------------------------------------
 // Dragging fires continuously, so the rate is sent at most every 150 ms.
@@ -616,7 +707,39 @@ $('yaw').oninput=function(){dragging=true;yawChanged();};
 $('yaw').onchange=function(){dragging=false;yawChanged();};
 $('ystop').onclick=function(){$('yaw').value=0;dragging=false;yawChanged();
  flash(this,true);say('spin stopped');};
+// Heading: deg=0 is "hold where you are", anything else is a relative turn.
+// Each also zeroes the slider, since the firmware drops the manual rate.
+function heading(id,deg,label){$(id).onclick=function(){
+ $('yaw').value=0;$('yv').textContent='0 °/s';dragging=false;
+ send('turn&deg='+deg,this,label);};}
+heading('hhold',0,'hold heading');
+heading('hl90',-90,'turn -90°');
+heading('hr90',90,'turn +90°');
+heading('h180',180,'turn 180°');
+$('hfree').onclick=function(){$('yaw').value=0;$('yv').textContent='0 °/s';
+ dragging=false;send('yaw_free',this,'heading released');};
 bind('treset','trim_reset');
+// Auto-trim toggle: writes tK through the normal gains endpoint so the
+// firmware's range check still applies.  OFF stashes the current rate and
+// ON restores it, so a rate tuned in the Gains panel round-trips.
+// ponytail: 0.005 first-use default is a conservative guess - tune tK in
+// the Gains panel if it learns too slowly, the toggle remembers it.
+$('ttog').onclick=function(){
+ if(!G)return;
+ var b=this,on=G.tK.v!=0,v=0;
+ if(on)localStorage.tkOn=G.tK.v;
+ else v=+localStorage.tkOn||0.005;
+ b.disabled=true;
+ fetch('/api/gains',{method:'POST',
+  headers:{'Content-Type':'application/x-www-form-urlencoded'},
+  body:'tK='+v})
+ .then(function(r){
+   flash(b,r.ok);
+   say(r.ok?'auto-trim '+(on?'off':'on'):'auto-trim rejected');
+   if(r.ok)loadG();                     // refresh G so poll() sees the state
+  })
+ .catch(function(){flash(b,false);say('auto-trim failed');});
+};
 bind('cstart','cal_start');
 bind('ccap','cal_capture');
 // Saving writes EEPROM, so confirm before spending a write cycle.
@@ -636,6 +759,21 @@ void handleRoot() {
                    DASHBOARD_GZ_LEN);
 }
 
+// Anything that is not a route we serve gets redirected to the dashboard.
+// With the wildcard DNS above, this single handler catches every platform's
+// connectivity probe (Android's /generate_204, Apple's /hotspot-detect.html,
+// Windows' /ncsi.txt and friends) without naming any of them - they all
+// resolve here, and none of them match a registered path.
+void handleCaptive() {
+  // Built from the AP's actual address rather than hard-coded, so changing
+  // the softAP configuration cannot leave this pointing somewhere dead.
+  IPAddress ip = WiFi.softAPIP();
+  char url[32];
+  snprintf(url, sizeof(url), "http://%u.%u.%u.%u/", ip[0], ip[1], ip[2], ip[3]);
+  webServer.sendHeader("Location", url, true);
+  webServer.send(302, "text/plain", "");
+}
+
 // GET /api/state  — read-only telemetry snapshot as JSON.
 //
 // This handler only READS shared state; it never commands the motors.
@@ -648,7 +786,7 @@ void handleApiState() {
   // 640 rather than 512: the raw accelerometer values and cal_result string
   // added when Bluetooth was removed push the worst case past the old size,
   // and snprintf truncates silently - which would emit malformed JSON.
-  char json[640];
+  char json[704];
   int n = snprintf(json, sizeof(json),
     "{"
       "\"robot_angleX\":%.3f,"
@@ -679,6 +817,9 @@ void handleApiState() {
       "\"trimX\":%.3f,"
       "\"trimY\":%.3f,"
       "\"yaw_rate\":%.1f,"
+      // Dead-reckoned heading and whether the outer loop is driving it.
+      "\"robot_yaw\":%.1f,"
+      "\"yaw_hold\":%s,"
       "\"cal_result\":\"%s\""
     "}",
     robot_angleX, robot_angleY,
@@ -694,6 +835,7 @@ void handleApiState() {
     armed             ? "true" : "false",
     batt_voltage,
     AcX, AcY, AcZ, trimX, trimY, yaw_rate_cmd,
+    robot_yaw, yaw_hold ? "true" : "false",
     cal_result);
   // Truncated JSON would be malformed, so refuse to send it rather than let
   // the dashboard silently fail to parse.
@@ -879,7 +1021,52 @@ void handleApiCommand() {
       return;
     }
     yaw_rate_request = (float)v;
+    // The slider is manual control, so taking it overrides any heading the
+    // outer loop was chasing - otherwise the two would fight over
+    // yaw_rate_cmd and the hold would silently win every iteration.
+    yaw_hold = false;
+    yaw_turn_new = false;
     webServer.send(200, "application/json", "{\"ok\":true,\"cmd\":\"yaw\"}");
+    return;
+  }
+  else if (cmd == "turn") {
+    // Turn a relative number of degrees and hold there; deg=0 means "hold
+    // whatever heading you have right now".  Like yaw above this is only a
+    // setpoint - the control loop reads it inside the vertex branch, which
+    // is also the only place a heading exists to be relative to.
+    if (!webServer.hasArg("deg")) {
+      webServer.send(400, "application/json",
+                     "{\"ok\":false,\"error\":\"turn needs deg\"}");
+      return;
+    }
+    String raw = webServer.arg("deg");
+    const char* s = raw.c_str();
+    char* end;
+    double v = strtod(s, &end);
+    while (*end == ' ') end++;
+    if (end == s || *end != '\0' || isnan(v) || isinf(v)
+        || v < -YAW_TURN_MAX || v > YAW_TURN_MAX) {
+      char err[128];
+      snprintf(err, sizeof(err),
+               "{\"ok\":false,\"error\":\"deg must be a number between "
+               "%.0f and %.0f\"}", -YAW_TURN_MAX, YAW_TURN_MAX);
+      webServer.send(400, "application/json", err);
+      return;
+    }
+    // Order matters: the request must be in place before the loop is told
+    // to look at it, or it could latch a stale value.
+    yaw_turn_request = (float)v;
+    yaw_turn_new = true;
+    yaw_rate_request = 0;        // leave no manual rate to fall back into
+    webServer.send(200, "application/json", "{\"ok\":true,\"cmd\":\"turn\"}");
+    return;
+  }
+  else if (cmd == "yaw_free") {
+    // Release the heading loop without commanding any rotation.
+    yaw_hold = false;
+    yaw_turn_new = false;
+    yaw_rate_request = 0;
+    webServer.send(200, "application/json", "{\"ok\":true,\"cmd\":\"yaw_free\"}");
     return;
   }
   else {
@@ -941,12 +1128,31 @@ void startWebInterface() {
   Serial.print("\" started.  Open http://");
   Serial.println(WiFi.softAPIP());
 
+  // Wildcard DNS on port 53: every lookup answers with the cube's address,
+  // which is what turns a phone's connectivity probe into "tap to open the
+  // dashboard".  Failure here is not fatal - the IP still works.
+  if (!dnsServer.start(53, "*", WiFi.softAPIP()))
+    Serial.println("WARNING: captive-portal DNS failed to start"
+                   " (dashboard still reachable by IP).");
+
+  // mDNS for laptops: http://cube.local.  Also non-fatal.
+  if (MDNS.begin(MDNS_NAME)) {
+    MDNS.addService("http", "tcp", 80);
+    Serial.print("Also reachable at http://");
+    Serial.print(MDNS_NAME);
+    Serial.println(".local");
+  } else {
+    Serial.println("WARNING: mDNS failed to start (use the IP address).");
+  }
+
   webServer.on("/", HTTP_GET, handleRoot);
   webServer.on("/api/state", HTTP_GET, handleApiState);
   webServer.on("/api/command", HTTP_POST, handleApiCommand);
   webServer.on("/api/trace", HTTP_GET, handleApiTrace);
   webServer.on("/api/gains", HTTP_GET, handleApiGains);
   webServer.on("/api/gains", HTTP_POST, handleApiGainsSet);
+  // Registered last so it can only ever catch paths none of the above claim.
+  webServer.onNotFound(handleCaptive);
   webServer.begin();
 }
 
@@ -954,5 +1160,9 @@ void startWebInterface() {
 // handleClient() is non-blocking and returns immediately when idle, so it
 // does not disturb the 15 ms balancing period.
 void handleWebInterface() {
+  // Non-blocking: reads at most one waiting UDP packet and answers it.  A
+  // DNS reply is a single small datagram, so this costs far less than the
+  // HTTP serving below it.
+  dnsServer.processNextRequest();
   webServer.handleClient();
 }

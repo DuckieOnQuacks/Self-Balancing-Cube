@@ -44,6 +44,14 @@
 #define accSens 0            // 0 = ±2 g, 1 = ±4 g, 2 = ±8 g, 3 = ±16 g
 #define gyroSens 0           // 0 = ±250°/s, 1 = ±500°/s, 2 = ±1000°/s, 3 = ±2000°/s
 
+// Raw gyro counts per degree/second, derived from the range selected above
+// (131 at ±250°/s, halving with each step up).  Every place that converts a
+// raw GyX/GyY/GyZ reading into °/s MUST use this - the angle integration and
+// the controller's rate terms used to carry two different hard-coded
+// constants (65.536 and 131.0), so the estimator ran at twice the scale of
+// the loop that consumed it.
+#define GYRO_LSB_PER_DPS (131.0f / (1 << gyroSens))
+
 // Was 64.  The offsets struct occupies bytes 0-27; the tuning gains are
 // stored after it, so the allocation needs to be larger.  The ESP32 EEPROM
 // library is NVS-backed and expands in place, so existing saved calibration
@@ -52,7 +60,7 @@
 
 // Tuning gains are saved after the offsets struct.
 #define GAINS_EEPROM_ADDR 32
-#define NUM_GAINS         11   // 10 balancing gains + the auto-trim rate
+#define NUM_GAINS         12   // 10 balancing gains, auto-trim rate, heading hold
 // Marks a valid saved gain set.  Bump it only if the ORDER of GAIN_DEFS
 // changes or the fixed fields below move - not merely because a gain was
 // added or removed.  The record carries its own count and keeps the
@@ -99,6 +107,9 @@ extern float K3;
 extern float K4;
 extern float zK2;
 extern float zK3;
+// Outer heading loop: commanded yaw rate per degree of heading error.
+// 0 disables heading hold, leaving the yaw rate command fully manual.
+extern float zK1;
 
 // Gains used while balancing on an edge.  Edge mode uses motor 3 directly.
 extern float eK1;
@@ -174,6 +185,29 @@ extern float batt_voltage;
 #define YAW_RATE_MAX 90.0f     // clamp, degrees/second
 extern volatile float yaw_rate_request;
 extern float yaw_rate_cmd;
+
+// --- Heading hold and scripted turns ----------------------------------
+// robot_yaw integrates gyroZ while balancing on a vertex, giving a heading
+// in degrees relative to wherever the cube latched upright (it is zeroed at
+// each latch).  An outer proportional loop closes on it: the rate loop above
+// already holds whatever rate it is told, so commanding
+// zK1 * (yaw_target - robot_yaw) turns "spin at X°/s" into "sit at heading Y"
+// and, with a target set some degrees away, into "turn exactly that far".
+//
+// This is dead reckoning, not a compass: the MPU6050 has no magnetometer, so
+// robot_yaw accumulates the residual gyro bias left after the boot
+// calibration and will creep over minutes.  Good enough to hold still and to
+// land a 90° turn; not an absolute heading reference.
+#define YAW_TURN_MAX 720.0f    // largest single commanded turn, degrees
+extern float robot_yaw;        // integrated heading, degrees; 0 at latch
+extern float yaw_target;       // heading the outer loop is driving toward
+// Written by an HTTP handler (which only ever clears yaw_hold and raises
+// yaw_turn_new) and by the control loop, hence volatile.  Safe without
+// locking for the same reason the rest of this interface is: handlers run
+// from handleWebInterface() inside loop(), strictly between control cycles.
+extern volatile bool  yaw_hold;      // outer loop active?
+extern volatile bool  yaw_turn_new;  // a turn request is waiting
+extern volatile float yaw_turn_request;  // degrees, relative to current
 
 // --- Telemetry trace ---------------------------------------------------
 // A ring buffer of one sample per control-loop iteration (66.7 Hz), so the
@@ -253,7 +287,11 @@ void writeTo(byte device, byte address, byte value);
 void beep();
 void save();
 void angle_setup();
-void angle_calc();
+// dt is the MEASURED time since the previous call, in seconds.  It used to
+// integrate the constant loop_time instead, so any iteration that ran long
+// (typically handleWebInterface() pushing the dashboard) silently corrupted
+// the angle by the amount it overran.
+void angle_calc(float dt);
 void XYZ_to_threeWay(float pwm_X, float pwm_Y, float pwm_Z);
 void threeWay_to_XY(int in_speed1, int in_speed2, int in_speed3);
 void battVoltage(double voltage);

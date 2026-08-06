@@ -42,8 +42,10 @@ void angle_setup() {
   beep();
   leds[2] = CRGB(0, 0, 200);
   FastLED.show();
+  // The dt passed here just matches the delay below.  Bias measurement only
+  // sums the raw rates; the integrated angle is discarded when a pose latches.
   for (int i = 0; i < 512; i++) {
-    angle_calc();
+    angle_calc(0.005f);
     GyZ_offset_sum += GyZ;
     delay(5);
   }
@@ -56,7 +58,7 @@ void angle_setup() {
   leds[1] = CRGB(0, 0, 200);
   FastLED.show();
   for (int i = 0; i < 512; i++) {
-    angle_calc();
+    angle_calc(0.005f);
     GyY_offset_sum += GyY;
     delay(5);
   }
@@ -69,7 +71,7 @@ void angle_setup() {
   leds[0] = CRGB(0, 0, 200);
   FastLED.show();
   for (int i = 0; i < 512; i++) {
-    angle_calc();
+    angle_calc(0.005f);
     GyX_offset_sum += GyX;
     delay(5);
   }
@@ -102,7 +104,7 @@ void angle_setup() {
   delay(300);
 }
 
-void angle_calc() {
+void angle_calc(float dt) {
   // Read the three raw gyro registers (0x43 through 0x48).
   Wire.beginTransmission(MPU6050);
   Wire.write(0x43);
@@ -137,14 +139,21 @@ void angle_calc() {
   GyY -= GyY_offset;
   GyX -= GyX_offset;
 
-  // Integrate gyro rate into an angle.  65.536 converts raw readings at the
-  // selected ±250°/s gyro range into degrees per second.
-  robot_angleY += GyY * loop_time / 1000 / 65.536;
+  // Integrate gyro rate into an angle.  All-float on purpose: this was
+  //     GyY * loop_time / 1000 / 65.536
+  // where GyY and loop_time are both integers, so `GyY * 15 / 1000` was an
+  // INTEGER division that truncated before the float divide ever ran.  Any
+  // rate under 67 counts (~0.5°/s at ±250°/s) integrated to exactly zero -
+  // a dead zone sitting right where a balancing cube lives - and everything
+  // above it came out as a coarse staircase.  The divisor was wrong too:
+  // 65.536 is the ±500°/s figure, so the estimate ran at twice the scale the
+  // controller's own GyX / 131.0 rate terms assumed.  See GYRO_LSB_PER_DPS.
+  robot_angleY += GyY * dt / GYRO_LSB_PER_DPS;
   Acc_angleY = atan2(AcXc, -AcZc) * 57.2958;
   // Combine fast gyro response with the accelerometer's long-term reference.
   robot_angleY = robot_angleY * Gyro_amount + Acc_angleY * (1.0 - Gyro_amount);
 
-  robot_angleX += GyX * loop_time / 1000 / 65.536;
+  robot_angleX += GyX * dt / GYRO_LSB_PER_DPS;
   Acc_angleX = -atan2(AcYc, -AcZc) * 57.2958;
   robot_angleX = robot_angleX * Gyro_amount + Acc_angleX * (1.0 - Gyro_amount);
 
@@ -154,6 +163,12 @@ void angle_calc() {
     robot_angleX = Acc_angleX;
     robot_angleY = Acc_angleY;
     vertical_vertex = true;
+    // Every balancing session starts facing "zero" with no target, so a
+    // turn commanded before the cube fell can never be resumed against
+    // whoever just stood it back up.
+    robot_yaw = 0;
+    yaw_target = 0;
+    yaw_hold = false;
   } else if (abs(AcX) > 7000 && abs(AcX) < 10000 && abs(Acc_angleX) < 0.3 && !vertical_vertex && !vertical_edge) {
     robot_angleX = Acc_angleX;
     robot_angleY = Acc_angleY;
@@ -163,6 +178,7 @@ void angle_calc() {
     vertical_vertex = false;
     yaw_rate_request = 0;   // see below
     yaw_rate_cmd = 0;
+    yaw_hold = false;       // and never chase a heading target after a fall
   } else if ((abs(robot_angleX) > 7 || abs(robot_angleY) > 7) && vertical_edge) {
     vertical_edge = false;
     // Losing the pose means the cube fell.  Forget any commanded spin: the
@@ -289,6 +305,11 @@ void calStart() {
   // Extracted from Tuning() so the Bluetooth and web interfaces run the
   // exact same calibration code rather than two copies that could drift.
   calibrating = true;
+  // Re-record BOTH poses every run.  This flag survives a completed
+  // calibration (only a reboot cleared it), so without this reset a second
+  // calibration in the same power session skipped straight to the edge step
+  // and silently reused the stale vertex offsets.
+  vertex_calibrated = false;
   cal_result = "Calibration started.";
   Serial.println("Calibrating on.");
   Serial.println("Set the cube on vertex...");

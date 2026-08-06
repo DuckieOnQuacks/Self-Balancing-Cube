@@ -21,6 +21,7 @@ float K3 = 1.6;
 float K4 = 0.008;
 float zK2 = 8.00;
 float zK3 = 0.30;
+float zK1 = 1.00;              // heading hold: °/s commanded per ° of error
 
 float eK1 = 190;
 float eK2 = 31.00;
@@ -73,6 +74,13 @@ int16_t motor3_speed;
 volatile float yaw_rate_request = 0;
 float yaw_rate_cmd = 0;
 float trimX = 0, trimY = 0;
+
+// Heading hold / scripted turns (see ESP32.h).
+float robot_yaw = 0;
+float yaw_target = 0;
+volatile bool  yaw_hold = false;
+volatile bool  yaw_turn_new = false;
+volatile float yaw_turn_request = 0;
 
 CRGB leds[NUM_PIXELS];
 const char* cal_result = "";   // see ESP32.h
@@ -194,8 +202,17 @@ void loop() {
   // This is the fast control loop.  It is deliberately time-based rather
   // than delay-based so sensor and motor work can run at a stable period.
   if (currentT - previousT_1 >= loop_time) {
+    // Time actually elapsed since the last control pass.  The estimator used
+    // to assume exactly loop_time, so an iteration that ran long - almost
+    // always handleWebInterface() pushing the dashboard or a trace batch -
+    // under-integrated the gyro by however far it overran.  Clamped because
+    // an overrun long enough to matter (a stalled client, the first pass
+    // after setup) means the rate sample is stale, and integrating it over
+    // the full gap would be worse than admitting the gap.
+    float dt = (currentT - previousT_1) / 1000.0f;
+    dt = constrain(dt, 0.005f, 0.045f);
     Tuning();
-    angle_calc();
+    angle_calc(dt);
 
     // Encoder interrupts accumulate counts between control-loop iterations.
     // Copy each interval's count as a speed estimate, then start a new one.
@@ -223,6 +240,8 @@ void loop() {
         vertical_edge = false;
         yaw_rate_request = 0;       // never resume a spin on its own
         yaw_rate_cmd = 0;
+        yaw_hold = false;           // nor resume chasing a heading target
+        yaw_turn_new = false;
         break;
       case WEB_CMD_ARM:
         armed = true;
@@ -233,6 +252,8 @@ void loop() {
         vertical_edge = false;
         yaw_rate_request = 0;       // arm to a standstill, not into a spin
         yaw_rate_cmd = 0;
+        yaw_hold = false;
+        yaw_turn_new = false;
         break;
       case WEB_CMD_TRIM_RESET:
         // Forget the learned balance point and start again from zero.
@@ -282,12 +303,33 @@ void loop() {
     // below stops the motors and engages the brake.
     if (armed && vertical_vertex && calibrated && !calibrating) {
       digitalWrite(BRAKE, HIGH);
-      gyroX = GyX / 131.0;
-      gyroY = GyY / 131.0;
-      gyroZ = GyZ / 131.0;
+      gyroX = GyX / GYRO_LSB_PER_DPS;
+      gyroY = GyY / GYRO_LSB_PER_DPS;
+      gyroZ = GyZ / GYRO_LSB_PER_DPS;
       gyroXfilt = alpha * gyroX + (1 - alpha) * gyroXfilt;
       gyroYfilt = alpha * gyroY + (1 - alpha) * gyroYfilt;
-      
+
+      // --- Heading: dead-reckon it, then optionally close a loop on it ---
+      // Integrating here rather than above the branch is deliberate: gyroZ
+      // is only meaningful in vertex mode, and a heading accumulated while
+      // the cube lay on its side would be nonsense to hold on to.
+      robot_yaw += gyroZ * dt;
+      if (yaw_turn_new) {
+        // Turns are RELATIVE to where the cube is pointing right now, so
+        // repeated "+90" presses walk it around a square.
+        yaw_target = robot_yaw + constrain(yaw_turn_request,
+                                           -YAW_TURN_MAX, YAW_TURN_MAX);
+        yaw_hold = true;
+        yaw_turn_new = false;
+      }
+      // Outer proportional loop; feeds the same clamped rate command the
+      // slider drives, so the inner rate loop below is untouched.  No
+      // angle wrapping on purpose: target and heading share one unbounded
+      // frame, which is what makes "turn 720" mean two full spins.
+      if (yaw_hold)
+        yaw_rate_cmd = constrain(zK1 * (yaw_target - robot_yaw),
+                                 -YAW_RATE_MAX, YAW_RATE_MAX);
+
       // Learn the true balance point.  Sustained wheel speed in one
       // direction means the setpoint is on the wrong side of the real
       // balance point, so move the trim AGAINST that speed until the wheels
@@ -331,7 +373,7 @@ void loop() {
     } else if (armed && vertical_edge && calibrated && !calibrating) {
       // In edge mode, only motor 3 is used to correct the detected tilt.
       digitalWrite(BRAKE, HIGH);
-      gyroX = GyX / 131.0;
+      gyroX = GyX / GYRO_LSB_PER_DPS;
       gyroXfilt = alpha * gyroX + (1 - alpha) * gyroXfilt;
 
       // Same balance-point learning as vertex mode, but edge mode measures
